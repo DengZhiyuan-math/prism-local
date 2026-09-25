@@ -1,0 +1,7 @@
+{
+  "main": "main.tex",
+  "outdir": "build",
+  "snippets": [
+    { "name": "TODO marker", "text": "% TODO: ", "caret": 8 }
+  ]
+}

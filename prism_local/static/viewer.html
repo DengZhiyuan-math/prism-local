@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PDF · prism-local</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/app.css">
+<style>
+  body { background: var(--pdf-bg); }
+  #pdf-pane.full { width: auto; flex: 1; min-width: 0; height: 100vh; }
+  #viewer-note { color: var(--muted); font-size: 11px; margin-left: 10px; white-space: nowrap; }
+  #viewer-note.warn { color: var(--warn); }
+</style>
+</head>
+<body>
+<section id="pdf-pane" class="full">
+  <div id="pdf-toolbar">
+    <button id="zoom-out" title="Zoom out">−</button>
+    <span id="zoom-label">100%</span>
+    <button id="zoom-in" title="Zoom in">+</button>
+    <button id="zoom-fit" title="Fit width">Fit</button>
+    <span id="viewer-note">Double-click to jump to the source in the editor tab</span>
+    <span id="page-label"></span>
+    <a href="/pdf" target="_blank" title="Raw PDF (browser viewer, for printing/downloading)">⤓ raw</a>
+  </div>
+  <div id="pdf-scroll"><div id="pdf-pages"></div><div id="pdf-empty">No PDF yet — compile in the editor.</div></div>
+</section>
+<script src="/static/vendor/pdf.js"></script>
+<script src="/static/common.js"></script>
+<script src="/static/pdfview.js"></script>
+<script src="/static/viewer.js"></script>
+</body>
+</html>

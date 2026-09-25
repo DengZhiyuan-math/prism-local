@@ -1,0 +1,28 @@
+\section{Introduction}\label{sec:intro}
+
+This file is a playground. Double-click a line in the PDF to jump here, or put
+the cursor on a line and press Cmd-J (Ctrl-J) to find it in the PDF.
+Type \verb|\cref{| to see label completion, and \verb|\cite{| for citations,
+as in \cite{Knuth1984}.
+
+\begin{definition}\label{def:convex}
+  A function $f\colon \R^n \to \R$ is \emph{convex} if
+  \begin{equation}\label{eq:convex}
+    f(t x + (1-t) y) \le t f(x) + (1-t) f(y)
+  \end{equation}
+  for all $x, y \in \R^n$ and $t \in [0,1]$.
+\end{definition}
+
+\begin{lemma}\label{lem:norm-convex}
+  Every norm $\norm{\cdot}$ on $\R^n$ is convex in the sense of \cref{def:convex}.
+\end{lemma}
+
+\begin{proof}
+  By the triangle inequality and homogeneity,
+  $\norm{t x + (1-t) y} \le t\norm{x} + (1-t)\norm{y}$, which is \eqref{eq:convex}.
+\end{proof}
+
+\begin{remark}
+  Ask the Claude panel, for example, to ``add a corollary about convexity of
+  $x \mapsto \norm{x}^2$ after \cref{lem:norm-convex}'', then review the diff.
+\end{remark}

@@ -1,0 +1,26 @@
+\documentclass[11pt]{amsart}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{hyperref}
+\usepackage[capitalize]{cleveref}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\norm}[1]{\lVert #1 \rVert}
+
+\title{A minimal prism-local example}
+\author{Example Author}
+
+\begin{document}
+\maketitle
+
+\input{sections/intro}
+
+\bibliographystyle{amsplain}
+\bibliography{refs}
+\end{document}

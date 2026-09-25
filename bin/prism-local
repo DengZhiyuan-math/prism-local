@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# prism-local [PROJECT_DIR] [--port 8765] [--no-browser]
+# Symlink this script onto your PATH, or call it by its full path.
+set -euo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+exec python3 "$(dirname "$SELF")/../prism_local/server.py" "$@"

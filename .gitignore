@@ -1,0 +1,10 @@
+# Build output of example projects
+examples/*/build/
+# Atomic-save temp files
+*.prism-tmp
+# Python
+__pycache__/
+*.pyc
+# macOS
+.DS_Store
+._*

@@ -1,0 +1,665 @@
+#!/usr/bin/env python3
+"""prism-local: a local web studio for LaTeX projects.
+
+Editor + PDF preview with SyncTeX + a Claude Code agent panel, served from
+127.0.0.1 with the Python standard library only.
+
+    python3 prism_local/server.py [PROJECT_DIR] [--port 8765] [--no-browser]
+
+Besides the configured build commands it runs only read-only `git status` /
+`git diff` and, for the Claude panel, the local Claude Code CLI (agent.py).
+Optional per-project settings live in PROJECT_DIR/prism.json (see README).
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import gzip
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from agent import AgentManager, claude_bin  # noqa: E402
+
+STATIC = Path(__file__).resolve().parent / "static"
+EDITABLE_SUFFIXES = {".tex", ".bib", ".md", ".sty", ".cls", ".bbx", ".cbx", ".txt"}
+SKIP_DIRS = {"node_modules", "__pycache__", "venv", ".venv"}
+MAX_FILES = 3000
+BUILD_LOCK = threading.Lock()
+
+DEFAULT_LABEL_PREFIXES = {
+    "theorem": "thm", "proposition": "prop", "lemma": "lem", "corollary": "cor",
+    "conjecture": "conj", "definition": "def", "assumption": "ass", "example": "ex",
+    "remark": "rem", "equation": "eq", "align": "eq", "figure": "fig", "table": "tab",
+    "section": "sec",
+}
+STANDARD_THEOREMS = ["theorem", "proposition", "lemma", "corollary", "definition",
+                     "remark", "example"]
+
+
+class Config:
+    """Project settings: defaults, overridden by PROJECT_DIR/prism.json."""
+
+    def __init__(self, root: Path):
+        self.root = root.resolve()
+        data = {}
+        cfg = self.root / "prism.json"
+        if cfg.is_file():
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+        self.main = data.get("main") or self._guess_main()
+        self.outdir = data.get("outdir", "build").strip("/") or "build"
+        self.files = data.get("files")                 # optional list of globs
+        self.exclude = data.get("exclude", [])
+        self.label_prefixes = {**DEFAULT_LABEL_PREFIXES, **data.get("labelPrefixes", {})}
+        self.snippets = data.get("snippets", [])
+        self.build = self._build_cmds(data.get("build") or {})
+        stem = Path(self.main).stem
+        out = self.root / self.outdir
+        self.pdf = out / f"{stem}.pdf"
+        self.log = out / f"{stem}.log"
+        self.synctex = out / f"{stem}.synctex.gz"
+
+    def _guess_main(self) -> str:
+        if (self.root / "main.tex").is_file():
+            return "main.tex"
+        cands = [p for p in sorted(self.root.glob("*.tex")) if not p.name.startswith("._")
+                 and "\\documentclass" in p.read_text(errors="replace")[:5000]]
+        return cands[0].name if cands else "main.tex"
+
+    def _build_cmds(self, user: dict) -> dict:
+        tect, lmk = shutil.which("tectonic"), shutil.which("latexmk")
+        if tect:
+            base = [tect, "-o", "{outdir}", "--keep-logs", "--keep-intermediates", "--synctex"]
+            auto = {"draft": base + ["-Z", "continue-on-errors", "{main}"],
+                    "strict": base + ["{main}"]}
+        elif lmk:
+            base = [lmk, "-pdf", "-synctex=1", "-interaction=nonstopmode", "-file-line-error",
+                    "-outdir={outdir}"]
+            auto = {"draft": base + ["-f", "{main}"], "strict": base + ["-halt-on-error", "{main}"]}
+        else:
+            auto = {}
+        cmds = {**auto, **{k: v for k, v in user.items() if v}}
+        for k, v in cmds.items():
+            if isinstance(v, str):                     # allow a shell-style string
+                cmds[k] = ["bash", "-c", v]
+        return cmds
+
+    def expand(self, argv: list[str]) -> list[str]:
+        return [a.replace("{main}", self.main).replace("{outdir}", self.outdir) for a in argv]
+
+
+CFG: Config = None  # type: ignore[assignment]
+ROOT: Path = Path.cwd()
+
+
+def set_root(root: Path) -> None:
+    global CFG, ROOT
+    CFG = Config(root)
+    ROOT = CFG.root
+
+
+MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8", ".pdf": "application/pdf",
+        ".svg": "image/svg+xml", ".png": "image/png"}
+
+
+# ---------------------------------------------------------------- files
+
+def _excluded(rel: str) -> bool:
+    parts = rel.split("/")
+    if any(p.startswith(".") or p in SKIP_DIRS for p in parts[:-1]):
+        return True
+    if parts[-1].startswith("._") or rel.startswith(CFG.outdir + "/"):
+        return True
+    return any(fnmatch.fnmatch(rel, g) for g in CFG.exclude)
+
+
+def resolve(rel: str) -> Path:
+    """Map a project-relative path to an editable file, or raise ValueError."""
+    if not rel or rel.startswith("/") or "\\" in rel:
+        raise ValueError("bad path")
+    p = (ROOT / rel).resolve()
+    if ROOT not in p.parents:
+        raise ValueError("outside project")
+    r = p.relative_to(ROOT).as_posix()
+    if p.suffix not in EDITABLE_SUFFIXES or _excluded(r):
+        raise ValueError("not an editable file")
+    return p
+
+
+def list_files() -> list[str]:
+    seen: set[str] = set()
+    if CFG.files:
+        for g in CFG.files:
+            for p in ROOT.glob(g):
+                rel = p.relative_to(ROOT).as_posix()
+                if p.is_file() and p.suffix in EDITABLE_SUFFIXES and not _excluded(rel):
+                    seen.add(rel)
+    else:
+        for dirpath, dirnames, filenames in os.walk(ROOT):
+            reld = Path(dirpath).relative_to(ROOT).as_posix()
+            reld = "" if reld == "." else reld + "/"
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith(".")
+                                 and d not in SKIP_DIRS and reld + d != CFG.outdir)
+            for f in filenames:
+                rel = reld + f
+                if Path(f).suffix in EDITABLE_SUFFIXES and not _excluded(rel):
+                    seen.add(rel)
+            if len(seen) > MAX_FILES:
+                break
+    return sorted(seen, key=lambda s: (s != CFG.main, s.count("/") == 0, s))
+
+
+def git_status() -> dict[str, str]:
+    try:
+        out = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return {}
+    st = {}
+    for line in out.splitlines():
+        if len(line) > 3:
+            st[line[3:].split(" -> ")[-1].strip('"')] = line[:2].strip() or "M"
+    return st
+
+
+def mtime(p: Path) -> float:
+    return p.stat().st_mtime_ns / 1e9
+
+
+# ---------------------------------------------------------------- symbols
+
+LABEL_RE = re.compile(r"\\label\{([^}]+)\}")
+BEGIN_RE = re.compile(r"\\begin\{([A-Za-z*]+)\}(?:\[([^\]]*)\])?")
+SECTION_RE = re.compile(
+    r"\\(section|subsection|subsubsection)\*?\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}")
+INPUT_RE = re.compile(r"\\(?:input|include)\{([^}]+)\}")
+MACRO_RE = re.compile(
+    r"\\(?:newcommand|renewcommand|providecommand|DeclareMathOperator|DeclarePairedDelimiter)\*?"
+    r"\s*\{?\\([A-Za-z]+)\}?")
+BIBKEY_RE = re.compile(r"^\s*@(\w+)\s*\{\s*([^,\s]+)\s*,", re.M)
+NEWTHEOREM_RE = re.compile(r"\\(?:newtheorem|declaretheorem|spnewtheorem)\*?\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}")
+
+
+def strip_comment(line: str) -> str:
+    return re.sub(r"(?<!\\)%.*", "", line)
+
+
+def document_order() -> list[str]:
+    """Project .tex files in the order the main file \\input's them (depth first)."""
+    order: list[str] = []
+
+    def visit(rel: str) -> None:
+        if rel in order:
+            return
+        order.append(rel)
+        try:
+            text = (ROOT / rel).read_text(errors="replace")
+        except OSError:
+            return
+        for line in text.splitlines():
+            for m in INPUT_RE.finditer(strip_comment(line)):
+                child = resolve_tex_name(m.group(1).strip())
+                if child:
+                    visit(child)
+
+    visit(CFG.main)
+    rest = [f for f in list_files() if f.endswith(".tex") and f not in order]
+    return order + rest
+
+
+def theorem_envs(files: list[str]) -> list[str]:
+    envs: list[str] = []
+    for rel in files:
+        if Path(rel).suffix not in (".tex", ".sty", ".cls"):
+            continue
+        for raw in (ROOT / rel).read_text(errors="replace").splitlines():
+            for m in NEWTHEOREM_RE.finditer(strip_comment(raw)):
+                if m.group(1) not in envs:
+                    envs.append(m.group(1))
+    return envs or list(STANDARD_THEOREMS)
+
+
+def symbols() -> dict:
+    labels, outline, macros = [], [], []
+    files = list_files()
+    envs = theorem_envs(files)
+    outline_envs = set(envs)
+    for rel in document_order():
+        if not (ROOT / rel).is_file():
+            continue
+        env = None
+        for n, raw in enumerate((ROOT / rel).read_text(errors="replace").splitlines(), 1):
+            line = strip_comment(raw)
+            m = SECTION_RE.search(line)
+            if m:
+                outline.append({"file": rel, "line": n, "kind": m.group(1),
+                                "title": m.group(2)})
+                env = m.group(1)
+            for m in BEGIN_RE.finditer(line):
+                if m.group(1) in outline_envs:
+                    outline.append({"file": rel, "line": n, "kind": m.group(1),
+                                    "title": m.group(2) or ""})
+                env = m.group(1)
+            for m in MACRO_RE.finditer(line):
+                macros.append({"name": m.group(1), "file": rel, "line": n})
+            for m in LABEL_RE.finditer(line):
+                labels.append({"label": m.group(1), "file": rel, "line": n,
+                               "kind": env or ""})
+    keys = []
+    for rel in (f for f in files if f.endswith(".bib")):
+        bib = ROOT / rel
+        text = bib.read_text(errors="replace")
+        for m in BIBKEY_RE.finditer(text):
+            if m.group(1).lower() not in ("string", "preamble", "comment"):
+                keys.append({"key": m.group(2), "type": m.group(1).lower(),
+                             "file": bib.relative_to(ROOT).as_posix(),
+                             "line": text.count("\n", 0, m.start()) + 1})
+    return {"labels": labels, "bibkeys": keys, "outline": outline, "macros": macros,
+            "environments": envs}
+
+
+# ---------------------------------------------------------------- build
+
+DIAG_RE = re.compile(r"^(error|warning): (.+?):(\d+): (.*)$")        # Tectonic
+FLE_RE = re.compile(r"^(\.?/?[^:\s]+\.(?:tex|sty|cls)):(\d+): (.*)$")    # -file-line-error
+LOG_WARN_RE = re.compile(
+    r"(LaTeX|Package \S+) Warning: (.*?)(?: on input line (\d+))?\.?$")
+
+
+def resolve_tex_name(name: str) -> str | None:
+    for cand in (name, name + ".tex"):
+        p = ROOT / cand
+        if p.is_file():
+            return p.relative_to(ROOT).as_posix()
+    return None
+
+
+def parse_stdout(out: str) -> list[dict]:
+    diags, seen = [], set()
+    for line in out.splitlines():
+        m = DIAG_RE.match(line.strip())
+        if m:
+            sev, name, ln, msg = m.groups()
+        else:
+            m = FLE_RE.match(line.strip())
+            if not m:
+                continue
+            sev, (name, ln, msg) = "error", m.groups()
+            name = name[2:] if name.startswith("./") else name
+        key = (sev, name, ln, msg)
+        if key in seen:           # engines repeat errors on every rerun
+            continue
+        seen.add(key)
+        diags.append({"severity": sev, "file": resolve_tex_name(name),
+                      "line": int(ln), "message": msg})
+    return diags
+
+
+def parse_log_warnings() -> list[dict]:
+    """LaTeX warnings (undefined refs/citations, ...) from the main .log file.
+
+    TeX's log records the current file by '(' path ... ')' nesting. We track a
+    stack of the repo files we recognise; this is a heuristic, good enough to
+    attribute warnings to a source file.
+    """
+    if not CFG.log.exists():
+        return []
+    text = CFG.log.read_text(errors="replace")
+    diags, seen, stack = [], set(), []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        msg = lines[i]         # rejoin TeX's hard-wrapped (79-column) lines
+        while len(lines[i]) >= 79 and i + 1 < len(lines):
+            i += 1
+            msg += lines[i]
+        # Update file stack (approximate): opens then closes in order.
+        for tok in re.finditer(r"\(([^\s()]*)|\)", msg):
+            if tok.group(0) == ")":
+                if stack:
+                    stack.pop()
+            else:
+                name = tok.group(1)
+                # Unresolvable file names (e.g. main.bbl, package files) are kept
+                # as "?name" so warnings inside them are not misattributed.
+                rel = resolve_tex_name(name.lstrip("./")) if name else None
+                stack.append(rel or ("?" + name if "." in name or "/" in name else None))
+        m = LOG_WARN_RE.search(msg)
+        if m and "Rerun" not in msg:
+            cur = next((s for s in reversed(stack) if s), None)
+            cur = cur if cur and cur.endswith(".tex") and cur[0] != "?" else None
+            ln = int(m.group(3)) if m.group(3) else None
+            text_msg = m.group(2).strip()
+            key = (cur, ln, text_msg)
+            if key not in seen:
+                seen.add(key)
+                diags.append({"severity": "warning", "file": cur if ln else None,
+                              "line": ln, "message": text_msg})
+        i += 1
+    return diags
+
+
+def run_build(mode: str) -> dict:
+    argv = CFG.build.get(mode)
+    if not argv:
+        return {"busy": False, "exit": 127, "mode": mode, "seconds": 0, "diagnostics": [],
+                "output": f"No '{mode}' build command. Install Tectonic or latexmk, "
+                          "or set \"build\" in prism.json.", "pdf_mtime": None}
+    if not BUILD_LOCK.acquire(blocking=False):
+        return {"busy": True}
+    try:
+        t0 = time.time()
+        (ROOT / CFG.outdir).mkdir(exist_ok=True)
+        proc = subprocess.run(CFG.expand(argv), cwd=ROOT, capture_output=True, text=True,
+                              timeout=900)
+        out = proc.stdout + proc.stderr
+        diags = parse_stdout(out)
+        known = {(d["message"]) for d in diags}
+        diags += [d for d in parse_log_warnings() if d["message"] not in known]
+        return {"busy": False, "exit": proc.returncode, "mode": mode,
+                "seconds": round(time.time() - t0, 1), "output": out,
+                "diagnostics": diags,
+                "pdf_mtime": mtime(CFG.pdf) if CFG.pdf.exists() else None}
+    finally:
+        BUILD_LOCK.release()
+
+
+# ---------------------------------------------------------------- synctex
+
+SP_TO_BP = 72.0 / 72.27 / 65536.0     # scaled points -> PDF points
+REC_RE = re.compile(r"^([\[(hvxkg$])(\d+),(\d+):(-?\d+),(-?\d+)(?::(-?\d+),(-?\d+),(-?\d+))?")
+
+
+class SyncTex:
+    """Minimal reader for .synctex.gz files (pdfTeX, XeTeX, LuaTeX, Tectonic)."""
+
+    def __init__(self) -> None:
+        self.stamp = None
+        self.inputs: dict[int, str] = {}
+        self.recs: list[tuple] = []   # (page, kind, file, line, x, y, w, h, d) in bp
+
+    def load(self) -> bool:
+        if not CFG.synctex.exists():
+            return False
+        st = CFG.synctex.stat().st_mtime_ns
+        if st == self.stamp:
+            return True
+        inputs, recs, page, unit, mag = {}, [], 0, 1.0, 1.0
+        with gzip.open(CFG.synctex, "rt", errors="replace") as fh:
+            for line in fh:
+                c = line[:1]
+                if c == "I" and line.startswith("Input:"):
+                    tag, _, path = line[6:].rstrip("\n").partition(":")
+                    if path:
+                        try:
+                            # pdfTeX writes paths relative to the working directory.
+                            pp = Path(path) if os.path.isabs(path) else ROOT / path
+                            rel = pp.resolve().relative_to(ROOT).as_posix()
+                            inputs[int(tag)] = rel
+                        except ValueError:
+                            pass
+                elif c == "{":
+                    page = int(line[1:])
+                elif line.startswith("Unit:"):
+                    unit = float(line[5:])
+                elif line.startswith("Magnification:"):
+                    mag = float(line[14:]) / 1000.0
+                elif c in "[(hvxkg$":
+                    m = REC_RE.match(line)
+                    if not m:
+                        continue
+                    f = int(m.group(2))
+                    if f not in inputs:
+                        continue
+                    s = unit * mag * SP_TO_BP
+                    w, h, d = (int(m.group(i)) * s if m.group(i) else 0.0
+                               for i in (6, 7, 8))
+                    recs.append((page, m.group(1), inputs[f], int(m.group(3)),
+                                 int(m.group(4)) * s, int(m.group(5)) * s, w, h, d))
+        self.inputs, self.recs, self.stamp = inputs, recs, st
+        return True
+
+    # Paragraph line boxes ('(') carry the line where the paragraph *ended*;
+    # the fine records (glyph runs x, kerns k, glue g, math $, ...) carry the
+    # line they were typeset from. So boxes locate the visual line, and fine
+    # records supply the source line.
+    FINE = "xkg$h"
+
+    def _line_box(self, page, x, y):
+        """Smallest wide hbox on `page` whose vertical extent contains y."""
+        best = None
+        for r in self.recs:
+            if r[0] == page and r[1] == "(" and r[6] > 0 \
+                    and r[5] - r[7] - 1 <= y <= r[5] + r[8] + 1 \
+                    and r[4] - 1 <= x <= r[4] + r[6] + 1:
+                if best is None or r[6] > best[6]:   # widest = the text line
+                    best = r
+        return best
+
+    def forward(self, rel: str, line: int) -> dict | None:
+        cands = [r for r in self.recs if r[2] == rel and r[3] > 0
+                 and r[1] in self.FINE]
+        if not cands:
+            cands = [r for r in self.recs if r[2] == rel and r[3] > 0]
+        if not cands:
+            return None
+        after = [r for r in cands if r[3] >= line]
+        target = min(r[3] for r in after) if after else max(r[3] for r in cands)
+        first = min((r for r in cands if r[3] == target),
+                    key=lambda r: (r[0], r[5], r[4]))
+        box = self._line_box(first[0], first[4], first[5])
+        if box:
+            return {"page": first[0], "x": box[4], "y": box[5] - box[7],
+                    "w": box[6], "h": max(box[7] + box[8], 8.0), "line": target}
+        return {"page": first[0], "x": first[4], "y": first[5] - 9,
+                "w": 60.0, "h": 12.0, "line": target}
+
+    def inverse(self, page: int, x: float, y: float) -> dict | None:
+        box = self._line_box(page, x, y)
+        on_page = [r for r in self.recs if r[0] == page and r[3] > 0]
+        if box:
+            base = box[5]
+            row = [r for r in on_page if r[1] in self.FINE
+                   and box[4] - 1 <= r[4] <= box[4] + box[6] + 1
+                   and base - box[7] - 1 <= r[5] <= base + box[8] + 1]
+            if row:
+                left = [r for r in row if r[4] <= x + 0.5]
+                r = max(left, key=lambda r: r[4]) if left else min(row, key=lambda r: r[4])
+                return {"file": r[2], "line": r[3]}
+        if not on_page:
+            return None
+        r = min(on_page, key=lambda r: (r[4] - x) ** 2 + 4 * (r[5] - y) ** 2)
+        return {"file": r[2], "line": r[3]}
+
+
+SYNC = SyncTex()
+SYNC_LOCK = threading.Lock()
+AGENT = AgentManager(lambda: ROOT, lambda: list_files())
+
+
+# ---------------------------------------------------------------- http
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "prism-local/1"
+
+    def log_message(self, fmt, *args):  # quiet
+        pass
+
+    # -- helpers
+    def _host_ok(self) -> bool:
+        host = (self.headers.get("Host") or "").split(":")[0]
+        return host in ("127.0.0.1", "localhost")
+
+    def _send(self, code, body: bytes, ctype="application/json", extra=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, obj, code=200):
+        self._send(code, json.dumps(obj).encode())
+
+    def _err(self, code, msg):
+        self._json({"error": msg}, code)
+
+    # -- GET
+    def do_GET(self):
+        if not self._host_ok():
+            return self._err(403, "bad host")
+        u = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        try:
+            if u.path in ("/", "/index.html"):
+                return self._static("index.html")
+            if u.path == "/viewer":
+                return self._static("viewer.html")
+            if u.path == "/api/pdfstat":
+                return self._json({"mtime": mtime(CFG.pdf) if CFG.pdf.exists() else None})
+            if u.path.startswith("/static/"):
+                return self._static(u.path[len("/static/"):])
+            if u.path == "/pdf":
+                if not CFG.pdf.exists():
+                    return self._err(404, "no PDF yet")
+                return self._send(200, CFG.pdf.read_bytes(), "application/pdf")
+            if u.path == "/api/tree":
+                st = git_status()
+                files = [{"path": f, "git": st.get(f, ""),
+                          "mtime": mtime(ROOT / f)} for f in list_files()]
+                return self._json({"root": ROOT.name, "files": files,
+                                   "order": document_order(),
+                                   "pdf_mtime": mtime(CFG.pdf) if CFG.pdf.exists() else None})
+            if u.path == "/api/config":
+                return self._json({"main": CFG.main, "outdir": CFG.outdir,
+                                   "modes": [m for m in ("draft", "strict", "check") if m in CFG.build],
+                                   "build": {k: CFG.expand(v) for k, v in CFG.build.items()},
+                                   "labelPrefixes": CFG.label_prefixes, "snippets": CFG.snippets})
+            if u.path == "/api/agent/events":
+                job = AGENT.jobs.get(int(q["job"]))
+                if not job:
+                    return self._err(404, "unknown job")
+                evs, done = job.wait_events(int(q.get("after", 0)), 20.0)
+                return self._json({"events": evs, "done": done})
+            if u.path == "/api/agent/info":
+                exe = claude_bin()
+                return self._json({"available": bool(exe), "bin": exe, "rate": AGENT.rate})
+            if u.path == "/api/symbols":
+                return self._json(symbols())
+            if u.path == "/api/file":
+                p = resolve(q.get("path", ""))
+                return self._json({"path": q["path"], "content": p.read_text(encoding="utf-8"),
+                                   "mtime": mtime(p)})
+            if u.path == "/api/diff":
+                args = ["git", "diff", "--no-color", "--"]
+                args += [q["path"]] if q.get("path") else []
+                if q.get("path"):
+                    resolve(q["path"])
+                out = subprocess.run(args, cwd=ROOT, capture_output=True, text=True,
+                                     timeout=20).stdout
+                return self._json({"diff": out})
+            if u.path == "/api/synctex/forward":
+                with SYNC_LOCK:
+                    if not SYNC.load():
+                        return self._err(404, "no synctex data; build first")
+                    r = SYNC.forward(q["file"], int(q["line"]))
+                return self._json(r or {"error": "no match"}, 200 if r else 404)
+            if u.path == "/api/synctex/inverse":
+                with SYNC_LOCK:
+                    if not SYNC.load():
+                        return self._err(404, "no synctex data; build first")
+                    r = SYNC.inverse(int(q["page"]), float(q["x"]), float(q["y"]))
+                return self._json(r or {"error": "no match"}, 200 if r else 404)
+            return self._err(404, "not found")
+        except (ValueError, KeyError) as e:
+            return self._err(400, str(e))
+        except FileNotFoundError:
+            return self._err(404, "file not found")
+
+    def _static(self, rel):
+        p = (STATIC / rel).resolve()
+        if STATIC not in p.parents or not p.is_file():
+            return self._err(404, "not found")
+        self._send(200, p.read_bytes(), MIME.get(p.suffix, "application/octet-stream"))
+
+    # -- POST
+    def do_POST(self):
+        # Custom header forces a CORS preflight, which we never answer, so other
+        # web pages cannot drive this server from the browser.
+        if not self._host_ok() or self.headers.get("X-Prism-Local") != "1":
+            return self._err(403, "forbidden")
+        u = urlparse(self.path)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n) or b"{}")
+            if u.path == "/api/file":
+                p = resolve(body["path"])
+                base = body.get("base_mtime")
+                if p.exists() and base is not None and abs(mtime(p) - base) > 1e-6 \
+                        and not body.get("force"):
+                    return self._json({"conflict": True, "mtime": mtime(p)}, 409)
+                tmp = p.with_name(p.name + ".prism-tmp")
+                tmp.write_text(body["content"], encoding="utf-8")
+                os.replace(tmp, p)
+                return self._json({"ok": True, "mtime": mtime(p)})
+            if u.path == "/api/agent":
+                r = AGENT.start(body["prompt"], body.get("session_id") or None,
+                                body.get("mode", "ask"), body.get("model") or None)
+                return self._json(r, 409 if "error" in r else 200)
+            if u.path == "/api/agent/usage":
+                return self._json(AGENT.probe_rate())
+            if u.path == "/api/agent/stop":
+                return self._json(AGENT.stop(int(body["job"])))
+            if u.path == "/api/agent/undo":
+                return self._json(AGENT.undo(int(body["turn"])))
+            if u.path == "/api/build":
+                r = run_build(body.get("mode", "draft"))
+                return self._json(r, 409 if r.get("busy") else 200)
+            return self._err(404, "not found")
+        except (ValueError, KeyError) as e:
+            return self._err(400, str(e))
+
+
+def main():
+    ap = argparse.ArgumentParser(description="prism-local: local LaTeX studio "
+                                 "(editor, PDF + SyncTeX, Claude Code panel)")
+    ap.add_argument("project", nargs="?", type=Path, default=Path.cwd(),
+                    help="LaTeX project directory (default: current directory)")
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--root", type=Path, help=argparse.SUPPRESS)   # backwards compatible
+    a = ap.parse_args()
+    set_root(a.root or a.project)
+    if not (ROOT / CFG.main).is_file():
+        print(f"prism-local: warning: main file {CFG.main} not found in {ROOT}", file=sys.stderr)
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
+    except OSError as e:
+        sys.exit(f"prism-local: cannot listen on 127.0.0.1:{a.port}: {e}")
+    url = f"http://127.0.0.1:{a.port}/"
+    modes = ", ".join(CFG.build) or "none (see README)"
+    print(f"prism-local: {url}\n  project: {ROOT}\n  main:    {CFG.main}\n"
+          f"  builds:  {modes}\n  Ctrl-C to stop", flush=True)
+    if not a.no_browser:
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())
