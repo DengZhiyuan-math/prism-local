@@ -90,13 +90,25 @@ bin/prism-home                            # opens http://127.0.0.1:8790/
 - **+ New project** (or `n`) creates a folder from a template (math paper with amsart and
   theorem environments, plain article, or empty), with `prism.json` and optionally a git
   repository, and opens it.
+- **A private GitHub repository per project.** Tick *Create a private GitHub repository* when
+  creating a project (or make it the default in ⚙ Settings). The project is committed and
+  pushed to a new private repository of its own, never to the prism-local repository. The
+  repository name comes from the folder name and can be edited. It is created with the
+  [GitHub CLI](https://cli.github.com) (`gh`), which must be logged in (`gh auth login`).
+  Settings shows which account it uses; set an owner there to create repositories in an
+  organization. If GitHub refuses, the project is still created and the message says why.
+- **⚙ Settings** also sets the default location for new projects and whether they get a git
+  repository.
+- The git chip shows the project's own repository, with a link to it on GitHub. A folder
+  inside some other repository (such as `examples/minimal`, inside prism-local's) has none of
+  its own, and the chip says so.
 - **Add folder…** adds an existing LaTeX folder. **Browse…** opens a native folder dialog (tkinter).
 - The **⋯** menu pins a project to the top, renames it in the list, shows it in Explorer/Finder,
   copies its path, or removes it from the list. Removing never touches the files.
 - Every project you open with prism-local, by any route, is added to the list automatically.
 - The ⌂ button in the editor opens the Home page, starting it if needed.
 
-The list is stored in `projects.json` in the state directory (`%LOCALAPPDATA%\prism-local` on
+The list is stored in `projects.json`, and the settings in `settings.json`, in the state directory (`%LOCALAPPDATA%\prism-local` on
 Windows, `~/.local/state/prism-local` elsewhere, or `$PRISM_STATE_DIR`).
 
 ## One-click launcher (Windows)

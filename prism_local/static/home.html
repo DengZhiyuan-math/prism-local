@@ -19,7 +19,8 @@
   <div class="actions right">
     <button id="btn-add" title="Add an existing LaTeX folder to this list">Add folder…</button>
     <button id="btn-new" class="primary" title="Create a new LaTeX project from a template">+ New project</button>
-    <button id="btn-theme" title="Toggle light/dark">◐</button>
+    <button id="btn-settings" class="icon" title="Settings">⚙</button>
+    <button id="btn-theme" class="icon" title="Toggle light/dark">◐</button>
   </div>
 </header>
 
@@ -70,11 +71,40 @@
         <b>Empty</b><small>just \documentclass and a document body</small></label>
     </fieldset>
     <label class="check"><input type="checkbox" name="git" checked> Initialize a git repository</label>
+    <label class="check"><input type="checkbox" name="github"> Create a private GitHub repository</label>
+    <label class="field gh-name" hidden><span>Repository <i id="gh-owner"></i></span>
+      <input name="github_name" spellcheck="false" autocomplete="off" pattern="[A-Za-z0-9._-]{1,100}"
+             title="Letters, digits, '.', '-' and '_'"></label>
+    <p class="hint gh-note" hidden></p>
     <label class="check"><input type="checkbox" name="open" checked> Open it after creating</label>
     <div class="dlg-error" hidden></div>
     <div class="dlg-actions">
       <button type="button" value="cancel" data-close>Cancel</button>
       <button type="submit" class="primary">Create</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-settings">
+  <form method="dialog" id="form-settings">
+    <h3>Settings</h3>
+    <label class="field"><span>Default location for new projects</span>
+      <span class="row"><input name="default_parent" placeholder="the folder used last" spellcheck="false">
+        <button type="button" data-browse="default_parent">Browse…</button></span></label>
+    <label class="check"><input type="checkbox" name="git_init"> Initialize a git repository for new projects</label>
+    <fieldset class="gh-set">
+      <legend>GitHub</legend>
+      <div id="gh-status" class="gh-status"></div>
+      <label class="check"><input type="checkbox" name="github_repo"> Create a private GitHub repository for each new project</label>
+      <label class="field"><span>Owner <i>(optional: an organization; empty for your own account)</i></span>
+        <input name="github_owner" spellcheck="false" autocomplete="off"></label>
+      <p class="hint">Every project gets a repository of its own, separate from the prism-local repository.
+        It is created with the GitHub CLI (<code>gh</code>), using the account it is logged in to.</p>
+    </fieldset>
+    <div class="dlg-error" hidden></div>
+    <div class="dlg-actions">
+      <button type="button" data-close>Cancel</button>
+      <button type="submit" class="primary">Save</button>
     </div>
   </form>
 </dialog>

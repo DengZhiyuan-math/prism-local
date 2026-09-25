@@ -103,6 +103,37 @@ class Create(TempState):
         self.assertGreater(g["changes"], 0)
 
 
+class SettingsAndGitHub(TempState):
+    def test_settings_round_trip_and_checks(self):
+        self.assertEqual(hub.load_settings(), hub.SETTINGS_DEFAULTS)
+        st = hub.save_settings({"default_parent": str(self.tmp), "github_repo": True,
+                                "github_owner": "my-org"})
+        self.assertEqual((st["github_repo"], st["github_owner"]), (True, "my-org"))
+        self.assertEqual(hub.load_settings(), st)
+        self.assertEqual(Path(hub.default_parent({"projects": []})), self.tmp.resolve())
+        with self.assertRaises(ValueError):
+            hub.save_settings({"github_owner": "not an owner!"})
+        with self.assertRaises(ValueError):
+            hub.save_settings({"default_parent": str(self.tmp / "missing")})
+
+    def test_repo_names(self):
+        self.assertEqual(hub.repo_name("dyn num paper"), "dyn-num-paper")
+        self.assertEqual(hub.repo_name("我的论文"), "latex-project")
+        self.assertEqual(hub.repo_name("我的论文 v2"), "v2")
+
+    def test_project_inside_another_repository_has_none_of_its_own(self):
+        g = hub.git_info(PROJECT)                  # examples/minimal, inside this repository
+        if g is None:
+            self.skipTest("not a git checkout")
+        self.assertTrue(g["nested"])
+
+    def test_github_refuses_bad_names_before_calling_github(self):
+        hub._gh_cache.update(at=time.time(), status={"gh": "gh", "logged_in": True, "account": "me"})
+        self.addCleanup(hub._gh_cache.clear)
+        self.assertIn("error", hub.create_github_repo(self.tmp, name="bad name!"))
+        self.assertIn("error", hub.create_github_repo(self.tmp, owner="bad owner!"))
+
+
 class HubServer(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

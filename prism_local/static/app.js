@@ -995,6 +995,14 @@ function setProvider(id, quiet) {
 function renderProviders(info) {
   P.list = info.providers || [];
   P.byId = Object.fromEntries(P.list.map((p) => [p.id, p]));
+  // A server started before this page's code was updated sends no provider list. Hide the
+  // empty menu and say how to get the new server, instead of showing a blank box.
+  $("#chat-provider").hidden = !P.list.length;
+  if (!P.list.length) {
+    chatAppend(`<div class="warn">The prism-local server is older than this page. Close every
+      Prism page for this project, wait about 10 seconds, and open it again to restart it.</div>`, "card");
+    return;
+  }
   $("#chat-provider").innerHTML = P.list.map((p) =>
     `<option value="${esc(p.id)}"${p.available ? "" : " disabled"} title="${esc(p.reason || "")}">${esc(p.label)}${p.available ? "" : " (not set up)"}</option>`).join("");
   let id = C.provider;

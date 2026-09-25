@@ -71,8 +71,10 @@ function matches(p, q) {
 function gitChip(id) {
   const g = H.git[id];
   if (!g) return `<span class="gitchip"></span>`;
+  if (g.nested) return `<span class="gitchip chip muted" title="No repository of its own: this folder is inside ${esc(g.toplevel_path)}">inside ${esc(g.toplevel)} repo</span>`;
   const extra = [g.changes ? `${g.changes} changed` : "clean", g.ahead ? `↑${g.ahead}` : "", g.behind ? `↓${g.behind}` : ""].filter(Boolean).join(" ");
-  return `<span class="gitchip chip ${g.changes ? "dirty" : ""}" title="git: branch ${esc(g.branch)}">⎇ ${esc(g.branch || "—")} · ${esc(extra)}</span>`;
+  const gh = g.github ? ` <a class="chip gh" href="${esc(g.github)}" target="_blank" rel="noopener" title="${esc(g.github)}">GitHub ↗</a>` : "";
+  return `<span class="gitchip"><span class="chip ${g.changes ? "dirty" : ""}" title="git: branch ${esc(g.branch)}">⎇ ${esc(g.branch || "—")} · ${esc(extra)}</span>${gh}</span>`;
 }
 function initials(name) {
   const w = name.replace(/[-_.]+/g, " ").trim().split(/\s+/);
@@ -255,6 +257,7 @@ function showMenu(id, anchor) {
     ["rename", "Rename in list…"],
     "-",
     ["reveal", "Show in folder"],
+    ...(H.git[id] && H.git[id].github ? [["github", "Open on GitHub"]] : []),
     ["copy", "Copy path"],
     "-",
     ["remove", "Remove from list…", "danger"],
@@ -274,6 +277,7 @@ $("#menu").addEventListener("click", (e) => {
   ({
     open: () => openProject(id), pin: () => setPinned(id, !byId(id).pinned), rename: () => openRename(id),
     reveal: () => reveal(id), copy: () => copyPath(id), remove: () => removeProject(id),
+    github: () => window.open(H.git[id].github, "_blank", "noopener"),
   })[b.dataset.m]();
 });
 window.addEventListener("scroll", closeMenu, { passive: true });
@@ -306,10 +310,33 @@ function openNew() {
   f.elements.parent.value = H.defaultParent;
   f.elements.author.value = store.get("home.author", "");
   f.elements.template.value = store.get("home.template", "amsart");
-  dlgError(dlg, ""); updateTarget();
+  const st = H.settings || {}, ready = !!(H.github && H.github.logged_in);
+  f.elements.git.checked = st.git_init !== false;
+  f.elements.github.checked = !!st.github_repo && ready;
+  f.elements.github.disabled = !ready;
+  f.elements.github_name.dataset.edited = "";
+  dlgError(dlg, ""); updateTarget(); updateGithubRow();
   dlg.showModal(); f.elements.name.focus();
 }
-$("#form-new").addEventListener("input", updateTarget);
+$("#form-new").addEventListener("input", (e) => {
+  if (e.target.name === "github_name") e.target.dataset.edited = "1";
+  updateTarget(); updateGithubRow();
+});
+// GitHub allows letters, digits, ".", "-" and "_" in repository names.
+const repoName = (folder) => folder.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 100) || "latex-project";
+function updateGithubRow() {
+  const f = $("#form-new"), on = f.elements.github.checked, gh = H.github || {};
+  f.querySelector(".gh-name").hidden = !on;
+  // A GitHub repository needs a git repository.
+  if (on) f.elements.git.checked = true;
+  f.elements.git.disabled = on;
+  f.elements.github_name.required = on;
+  if (on && !f.elements.github_name.dataset.edited) f.elements.github_name.value = repoName(f.elements.name.value.trim());
+  $("#gh-owner").textContent = `github.com/${(H.settings && H.settings.github_owner) || gh.account || "…"}/ · private`;
+  const note = f.querySelector(".gh-note");
+  note.hidden = !!gh.logged_in;
+  note.textContent = gh.logged_in ? "" : (gh.error || "GitHub is not connected.") + " See ⚙ Settings.";
+}
 $("#form-new").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target, dlg = $("#dlg-new"), btn = f.querySelector("button[type=submit]");
@@ -317,14 +344,17 @@ $("#form-new").addEventListener("submit", async (e) => {
     name: f.elements.name.value.trim(), parent: f.elements.parent.value.trim(),
     title: f.elements.title.value.trim(), author: f.elements.author.value.trim(),
     template: f.elements.template.value, git: f.elements.git.checked,
+    github: f.elements.github.checked, github_name: f.elements.github_name.value.trim(),
+    github_owner: (H.settings && H.settings.github_owner) || "",
   };
   store.set("home.author", body.author); store.set("home.template", body.template);
-  btn.disabled = true; dlgError(dlg, "");
+  btn.disabled = true; btn.textContent = body.github ? "Creating on GitHub…" : "Creating…"; dlgError(dlg, "");
   const r = await api("/api/projects/create", body);
-  btn.disabled = false;
+  btn.disabled = false; btn.textContent = "Create";
   if (r._status !== 200) return dlgError(dlg, r.error || "Could not create the project");
   dlg.close();
-  toast(`Created ${r.path}` + (r.git_note ? `\n${r.git_note}` : ""));
+  if (r.github && r.github.error) toast(`Created ${r.path}, but the GitHub repository was not created:\n${r.github.error}`, true);
+  else toast(`Created ${r.path}` + (r.github ? `\nGitHub: ${r.github.url}` : "") + (r.git_note ? `\n${r.git_note}` : ""));
   await load();
   if (f.elements.open.checked) openProject(r.id);
 });
@@ -360,6 +390,47 @@ $("#form-rename").addEventListener("submit", async (e) => {
 });
 
 $("#btn-new").onclick = openNew;
+
+/* ------------------------------------------------------------------ settings */
+async function loadSettings(refresh = false) {
+  const r = await api("/api/settings" + (refresh ? "?refresh=1" : "")).catch(() => null);
+  if (r && r._status === 200) { H.settings = r.settings; H.github = r.github; }
+  return r;
+}
+function renderGhStatus() {
+  const el = $("#gh-status"), gh = H.github || {};
+  el.className = "gh-status " + (gh.logged_in ? "ok" : "err");
+  el.textContent = gh.logged_in ? `✓ Connected as ${gh.account} (GitHub CLI)` : (gh.error || "Checking…");
+  const f = $("#form-settings");
+  f.elements.github_repo.disabled = !gh.logged_in;
+  f.elements.github_owner.placeholder = gh.account || "";
+}
+async function openSettings() {
+  const f = $("#form-settings"), dlg = $("#dlg-settings");
+  dlgError(dlg, "");
+  const fill = () => {
+    const st = H.settings || {};
+    f.elements.default_parent.value = st.default_parent || "";
+    f.elements.git_init.checked = st.git_init !== false;
+    f.elements.github_repo.checked = !!st.github_repo;
+    f.elements.github_owner.value = st.github_owner || "";
+    renderGhStatus();
+  };
+  fill(); dlg.showModal();
+  await loadSettings(true); fill();          // re-check gh: you may have just logged in
+}
+$("#btn-settings").onclick = openSettings;
+$("#form-settings").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target, dlg = $("#dlg-settings");
+  const r = await api("/api/settings", {
+    default_parent: f.elements.default_parent.value.trim(), git_init: f.elements.git_init.checked,
+    github_repo: f.elements.github_repo.checked, github_owner: f.elements.github_owner.value.trim(),
+  });
+  if (r._status !== 200) return dlgError(dlg, r.error || "Could not save the settings");
+  H.settings = r.settings; H.github = r.github; H.sig = null;
+  dlg.close(); toast("Settings saved"); load();
+});
 $("#btn-add").onclick = openAdd;
 
 /* ------------------------------------------------------------------ search, sort, keys */
@@ -379,5 +450,6 @@ document.addEventListener("keydown", (e) => {
 
 /* ------------------------------------------------------------------ start */
 load().then(loadAllGit);
+loadSettings();
 setInterval(() => { if (document.visibilityState === "visible" && !document.querySelector("dialog[open]")) load(); }, 10000);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { load(); loadAllGit(); } });

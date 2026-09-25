@@ -11,15 +11,18 @@
 </head>
 <body>
 <header id="top">
-  <button id="btn-sidebar" class="tiny" title="Show/hide the Files sidebar (⌘B)">☰</button>
-  <button id="btn-home" class="tiny" title="All projects (Home page)">⌂</button>
+  <button id="btn-sidebar" class="icon" title="Show/hide the Files sidebar (⌘B)">☰</button>
+  <button id="btn-home" class="icon" title="All projects (Home page)">⌂</button>
   <div class="brand"><span class="logo">∂</span> <span id="projname">prism-local</span></div>
   <div class="actions">
     <span id="build-status" class="status"></span>
   </div>
   <div class="actions right">
-    <button id="btn-chat" title="Show/hide the agent panel (⌘L sends the selection)">✦ Agent</button>
-    <button id="btn-theme" title="Toggle light/dark">◐</button>
+    <div id="agent-box" class="split-btn">
+      <button id="btn-chat" title="Show/hide the agent panel (⌘L sends the selection)">✦ Agent</button>
+      <select id="chat-provider" title="Which AI runs the agent. Add API providers in ~/.prism-local/agents.json (see README)."></select>
+    </div>
+    <button id="btn-theme" class="icon" title="Toggle light/dark">◐</button>
   </div>
 </header>
 
@@ -37,10 +40,9 @@
   <div class="gutter" data-resize="sidebar" id="sidebar-gutter"></div>
 
   <section id="editor-pane">
-    <div id="tabs"></div>
-    <div id="toolbar">
-      <button id="btn-forward" title="Show this line in the PDF (⌘J)">→ PDF</button>
-      <span class="hint">Double-click PDF to jump to source · ⌘F search · Ctrl-Space complete</span>
+    <div id="editor-head">
+      <div id="tabs"></div>
+      <button id="btn-forward" class="ghost" title="Show this line in the PDF (⌘J). Double-click the PDF to jump back to the source. ⌘F search · Ctrl-Space complete">→ PDF</button>
     </div>
     <div id="banner" hidden></div>
     <div id="editor"></div>
@@ -60,12 +62,12 @@
           <label class="dd-item" title="Compile automatically a moment after you stop typing"><input type="checkbox" id="auto-compile"> Auto-compile</label>
         </div>
       </div>
-      <button id="zoom-out" title="Zoom out">−</button>
+      <button id="zoom-out" class="icon" title="Zoom out">−</button>
       <span id="zoom-label">100%</span>
-      <button id="zoom-in" title="Zoom in">+</button>
+      <button id="zoom-in" class="icon" title="Zoom in">+</button>
       <button id="zoom-fit" title="Fit width">Fit</button>
       <span id="page-label"></span>
-      <a id="pdf-popout" href="/viewer" title="Open the PDF in a separate tab (stays in sync)">⧉ Pop out</a>
+      <a id="pdf-popout" class="btn ghost" href="/viewer" title="Open the PDF in a separate tab (stays in sync)">⧉ Pop out</a>
     </div>
     <div id="pdf-scroll"><div id="pdf-pages"></div><div id="pdf-empty">No PDF yet — press Compile.</div></div>
   </section>
@@ -74,12 +76,11 @@
   <aside id="chat">
     <div id="chat-head">
       <b>✦</b>
-      <select id="chat-provider" title="Which AI runs the agent. Add API providers in ~/.prism-local/agents.json (see README)."></select>
       <select id="chat-mode" title="Edit: may change files (you review a diff and can undo). Ask: read-only.">
         <option value="edit">Edit</option>
         <option value="ask">Ask (read-only)</option>
       </select>
-      <button id="chat-new" class="tiny" title="Start a new conversation">New chat</button>
+      <button id="chat-new" title="Start a new conversation">New chat</button>
     </div>
     <div id="quota"></div>
     <div id="chat-log"></div>
@@ -100,7 +101,7 @@
     <button data-panel="problems" class="active">Problems <span id="problem-count" class="badge"></span></button>
     <button data-panel="output">Output</button>
     <button data-panel="diff">Diff</button>
-    <button id="panel-toggle" title="Show/hide panel">▴</button>
+    <button id="panel-toggle" class="icon ghost" title="Show/hide panel">▴</button>
   </div>
   <div id="panel-body">
     <ul id="problems" class="panel-view"></ul>

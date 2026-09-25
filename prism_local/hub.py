@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -173,6 +174,9 @@ def list_projects() -> dict:
 
 
 def default_parent(data: dict) -> str:
+    chosen = load_settings()["default_parent"]
+    if chosen and Path(chosen).is_dir():
+        return chosen
     if data.get("last_parent") and Path(data["last_parent"]).is_dir():
         return data["last_parent"]
     recent = sorted(data["projects"], key=lambda p: p.get("opened") or p.get("added") or 0,
@@ -186,10 +190,20 @@ def default_parent(data: dict) -> str:
 
 
 def git_info(root: Path) -> dict | None:
+    """Branch and changes of the project's own repository. A project folder inside some
+    other repository (such as prism-local's) has none of its own: report which one."""
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=8, **NO_WINDOW)
     try:
-        r = subprocess.run(["git", "status", "--porcelain", "-b", "--", "."], cwd=root,
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
-                           **NO_WINDOW)
+        top = git("rev-parse", "--show-toplevel")
+        if top.returncode != 0:
+            return None
+        toplevel = Path(top.stdout.strip())
+        if registry.norm(toplevel.resolve()) != registry.norm(root.resolve()):
+            return {"nested": True, "toplevel": toplevel.name, "toplevel_path": str(toplevel)}
+        r = git("status", "--porcelain", "-b")
+        remote = git("remote", "get-url", "origin").stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode != 0:
@@ -200,9 +214,13 @@ def git_info(root: Path) -> dict | None:
     branch = re.split(r"\.\.\.| ", head)[0] if head else ""
     ahead = re.search(r"ahead (\d+)", head)
     behind = re.search(r"behind (\d+)", head)
+    web = None
+    m = re.match(r"(?:https://github\.com/|git@github\.com:)(.+?)(?:\.git)?$", remote)
+    if m:
+        web = "https://github.com/" + m.group(1)
     return {"branch": branch, "changes": len(lines) - 1,
             "ahead": int(ahead.group(1)) if ahead else 0,
-            "behind": int(behind.group(1)) if behind else 0}
+            "behind": int(behind.group(1)) if behind else 0, "github": web}
 
 
 def entry_for(pid: str) -> dict:
@@ -226,6 +244,131 @@ def add_project(path: str) -> dict:
 def _add(data: dict, p: Path) -> None:
     if registry.find(data, p) is None:
         data["projects"].append({"path": str(p), "added": time.time()})
+
+
+# ---------------------------------------------------------------- settings
+
+SETTINGS_DEFAULTS = {"default_parent": "", "git_init": True, "github_repo": False,
+                     "github_owner": ""}
+REPO_RE = re.compile(r"[A-Za-z0-9._-]{1,100}")
+OWNER_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
+
+
+def settings_path() -> Path:
+    return registry.state_dir() / "settings.json"
+
+
+def load_settings() -> dict:
+    data = registry.read_json(settings_path()) or {}
+    return {k: data.get(k, v) for k, v in SETTINGS_DEFAULTS.items()}
+
+
+def save_settings(body: dict) -> dict:
+    cur = load_settings()
+    if "default_parent" in body:
+        p = str(body["default_parent"] or "").strip().strip('"')
+        if p and not Path(os.path.expanduser(p)).is_dir():
+            raise ValueError(f"not a folder: {p}")
+        cur["default_parent"] = str(Path(os.path.expanduser(p)).resolve()) if p else ""
+    for k in ("git_init", "github_repo"):
+        if k in body:
+            cur[k] = bool(body[k])
+    if "github_owner" in body:
+        owner = str(body["github_owner"] or "").strip()
+        if owner and not OWNER_RE.fullmatch(owner):
+            raise ValueError("not a GitHub user or organization name")
+        cur["github_owner"] = owner
+    registry.write_json(settings_path(), cur)
+    return cur
+
+
+# ---------------------------------------------------------------- GitHub
+
+_gh_cache: dict = {}
+
+
+def gh_status(refresh: bool = False) -> dict:
+    """Whether the GitHub CLI (gh) is installed and logged in, and as whom."""
+    if _gh_cache and not refresh and time.time() - _gh_cache["at"] < 120:
+        return _gh_cache["status"]
+    exe = shutil.which("gh")
+    status = {"gh": exe, "logged_in": False, "account": None}
+    if not exe:
+        status["error"] = "GitHub CLI not found. Install it from https://cli.github.com, then run: gh auth login"
+    else:
+        try:
+            r = subprocess.run([exe, "auth", "status", "--hostname", "github.com"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=20, env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+                               **NO_WINDOW)
+            out = r.stdout + r.stderr
+            m = re.search(r"Logged in to github\.com (?:account|as) (\S+)", out)
+            if m and r.returncode == 0:
+                status.update(logged_in=True, account=m.group(1).strip("()"))
+            else:
+                status["error"] = "GitHub CLI is not logged in. Run: gh auth login"
+        except (OSError, subprocess.SubprocessError) as e:
+            status["error"] = f"gh auth status failed: {e}"
+    _gh_cache.update(at=time.time(), status=status)
+    return status
+
+
+def repo_name(folder: str) -> str:
+    """A GitHub repository name for a folder name: letters, digits, '.', '-', '_'."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", folder).strip("-.")
+    return name[:100] or "latex-project"
+
+
+def run_git(root: Path, *args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout, check=True,
+                          env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, **NO_WINDOW)
+
+
+def git_init(root: Path) -> None:
+    """A repository of the project's own, with build output ignored."""
+    gi = root / ".gitignore"
+    if not gi.exists():
+        gi.write_text(GITIGNORE, encoding="utf-8")
+    if not (root / ".git").exists():
+        try:
+            run_git(root, "init", "-q", "-b", "main")
+        except subprocess.CalledProcessError:          # git older than 2.28
+            run_git(root, "init", "-q")
+
+
+def create_github_repo(root: Path, owner: str = "", name: str = "") -> dict:
+    """Commit the project and push it to a new private GitHub repository.
+
+    Returns {"url"} or {"error"}. The project itself is never removed on failure."""
+    st = gh_status()
+    if not st.get("logged_in"):
+        return {"error": st.get("error") or "GitHub CLI is not ready"}
+    if owner and not OWNER_RE.fullmatch(owner):
+        return {"error": "not a GitHub user or organization name"}
+    name = name.strip() or repo_name(root.name)
+    if not REPO_RE.fullmatch(name):
+        return {"error": f"not a GitHub repository name: {name}"}
+    full = f"{owner}/{name}" if owner else name
+    try:
+        git_init(root)
+        run_git(root, "add", "-A")
+        if run_git(root, "status", "--porcelain").stdout.strip():
+            run_git(root, "commit", "-q", "-m", "Initial commit")
+        r = subprocess.run([st["gh"], "repo", "create", full, "--private", "--source", ".",
+                            "--remote", "origin", "--push"],
+                           cwd=root, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=180,
+                           env={**os.environ, "GH_PROMPT_DISABLED": "1"}, **NO_WINDOW)
+    except subprocess.CalledProcessError as e:
+        return {"error": f"git {e.cmd[1]} failed: {(e.stderr or e.stdout or '').strip()[:400]}"}
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"error": str(e)}
+    if r.returncode != 0:
+        return {"error": (r.stderr or r.stdout).strip()[:500] or "gh repo create failed"}
+    m = re.search(r"https://github\.com/\S+", r.stdout + r.stderr)
+    url = m.group(0).rstrip(".") if m else f"https://github.com/{owner or st['account']}/{name}"
+    return {"url": url}
 
 
 TEMPLATES = {
@@ -312,20 +455,22 @@ def create_project(body: dict) -> dict:
                      encoding="utf-8")
     (root / "prism.json").write_text(json.dumps({"main": "main.tex", "outdir": "build"},
                                                 indent=2) + "\n", encoding="utf-8")
-    git_note = None
-    if body.get("git"):
-        (root / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
+    git_note, github = None, None
+    if body.get("git") or body.get("github"):
         try:
-            subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True,
-                           timeout=20, **NO_WINDOW)
+            git_init(root)
         except (OSError, subprocess.SubprocessError) as e:
             git_note = f"git init failed: {e}"
+    if body.get("github") and not git_note:
+        github = create_github_repo(root, str(body.get("github_owner") or "").strip(),
+                                    str(body.get("github_name") or ""))
 
     def fn(data):
         _add(data, root)
         data["last_parent"] = str(parent.resolve())
     registry.update_projects(fn)
-    return {"id": registry.project_key(root), "path": str(root), "git_note": git_note}
+    return {"id": registry.project_key(root), "path": str(root), "git_note": git_note,
+            "github": github}
 
 
 def change_project(pid: str, body: dict) -> dict:
@@ -456,6 +601,9 @@ class Handler(BaseHTTPRequestHandler):
                 return serve_stream(self, PRESENCE, q["client"])
             if u.path == "/api/projects":
                 return self._json(list_projects())
+            if u.path == "/api/settings":
+                return self._json({"settings": load_settings(),
+                                   "github": gh_status(refresh=q.get("refresh") == "1")})
             if u.path == "/api/git":
                 return self._json({"git": git_info(Path(entry_for(q["id"])["path"]))})
             if u.path == "/api/pdf":
@@ -494,6 +642,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("bad client id")
                 PRESENCE.beat(cid)
                 return self._json({"ok": True})
+            if u.path == "/api/settings":
+                return self._json({"settings": save_settings(body), "github": gh_status()})
             if u.path == "/api/projects/add":
                 return self._json(add_project(str(body["path"])))
             if u.path == "/api/projects/create":
