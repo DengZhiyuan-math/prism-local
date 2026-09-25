@@ -154,7 +154,7 @@ class AgentManager:
             # The prompt goes through stdin so it can never be parsed as a flag.
             job.proc = subprocess.Popen(cmd, cwd=root, stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                        text=True, bufsize=1)
+                                        text=True, encoding="utf-8", errors="replace", bufsize=1)
             job.proc.stdin.write(prompt)
             job.proc.stdin.close()
             threading.Thread(target=lambda: stderr_lines.extend(job.proc.stderr), daemon=True).start()
@@ -242,7 +242,8 @@ class AgentManager:
                    "--disable-slash-commands", "--output-format", "stream-json", "--verbose"]
             try:
                 out = subprocess.run(cmd, input="ok", capture_output=True, text=True,
-                                     timeout=90, cwd=tempfile.gettempdir()).stdout
+                                     encoding="utf-8", errors="replace", timeout=90,
+                                     cwd=tempfile.gettempdir()).stdout
             except subprocess.TimeoutExpired:
                 return {"error": "usage check timed out", "rate": self.rate}
             for line in out.splitlines():

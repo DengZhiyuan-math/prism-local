@@ -73,7 +73,7 @@ class Config:
         if (self.root / "main.tex").is_file():
             return "main.tex"
         cands = [p for p in sorted(self.root.glob("*.tex")) if not p.name.startswith("._")
-                 and "\\documentclass" in p.read_text(errors="replace")[:5000]]
+                 and "\\documentclass" in p.read_text(encoding="utf-8", errors="replace")[:5000]]
         return cands[0].name if cands else "main.tex"
 
     def _build_cmds(self, user: dict) -> dict:
@@ -163,7 +163,8 @@ def list_files() -> list[str]:
 def git_status() -> dict[str, str]:
     try:
         out = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=ROOT,
-                             capture_output=True, text=True, timeout=10).stdout
+                             capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             timeout=10).stdout
     except Exception:
         return {}
     st = {}
@@ -204,7 +205,7 @@ def document_order() -> list[str]:
             return
         order.append(rel)
         try:
-            text = (ROOT / rel).read_text(errors="replace")
+            text = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
         except OSError:
             return
         for line in text.splitlines():
@@ -223,7 +224,7 @@ def theorem_envs(files: list[str]) -> list[str]:
     for rel in files:
         if Path(rel).suffix not in (".tex", ".sty", ".cls"):
             continue
-        for raw in (ROOT / rel).read_text(errors="replace").splitlines():
+        for raw in (ROOT / rel).read_text(encoding="utf-8", errors="replace").splitlines():
             for m in NEWTHEOREM_RE.finditer(strip_comment(raw)):
                 if m.group(1) not in envs:
                     envs.append(m.group(1))
@@ -239,7 +240,8 @@ def symbols() -> dict:
         if not (ROOT / rel).is_file():
             continue
         env = None
-        for n, raw in enumerate((ROOT / rel).read_text(errors="replace").splitlines(), 1):
+        text = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
+        for n, raw in enumerate(text.splitlines(), 1):
             line = strip_comment(raw)
             m = SECTION_RE.search(line)
             if m:
@@ -259,7 +261,7 @@ def symbols() -> dict:
     keys = []
     for rel in (f for f in files if f.endswith(".bib")):
         bib = ROOT / rel
-        text = bib.read_text(errors="replace")
+        text = bib.read_text(encoding="utf-8", errors="replace")
         for m in BIBKEY_RE.finditer(text):
             if m.group(1).lower() not in ("string", "preamble", "comment"):
                 keys.append({"key": m.group(2), "type": m.group(1).lower(),
@@ -281,7 +283,10 @@ def resolve_tex_name(name: str) -> str | None:
     for cand in (name, name + ".tex"):
         p = ROOT / cand
         if p.is_file():
-            return p.relative_to(ROOT).as_posix()
+            try:
+                return p.resolve().relative_to(ROOT).as_posix()
+            except ValueError:      # absolute path outside the project (a TeX distribution file)
+                return None
     return None
 
 
@@ -315,7 +320,7 @@ def parse_log_warnings() -> list[dict]:
     """
     if not CFG.log.exists():
         return []
-    text = CFG.log.read_text(errors="replace")
+    text = CFG.log.read_text(encoding="utf-8", errors="replace")
     diags, seen, stack = [], set(), []
     lines = text.splitlines()
     i = 0
@@ -361,8 +366,11 @@ def run_build(mode: str) -> dict:
     try:
         t0 = time.time()
         (ROOT / CFG.outdir).mkdir(exist_ok=True)
+        # bibtex runs inside outdir under latexmk; let it find .bib files in the project root.
+        env = {**os.environ,
+               "BIBINPUTS": os.pathsep.join([str(ROOT), os.environ.get("BIBINPUTS", "")])}
         proc = subprocess.run(CFG.expand(argv), cwd=ROOT, capture_output=True, text=True,
-                              timeout=900)
+                              encoding="utf-8", errors="replace", timeout=900, env=env)
         out = proc.stdout + proc.stderr
         diags = parse_stdout(out)
         known = {(d["message"]) for d in diags}
@@ -396,7 +404,7 @@ class SyncTex:
         if st == self.stamp:
             return True
         inputs, recs, page, unit, mag = {}, [], 0, 1.0, 1.0
-        with gzip.open(CFG.synctex, "rt", errors="replace") as fh:
+        with gzip.open(CFG.synctex, "rt", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 c = line[:1]
                 if c == "I" and line.startswith("Input:"):
@@ -569,7 +577,7 @@ class Handler(BaseHTTPRequestHandler):
                 if q.get("path"):
                     resolve(q["path"])
                 out = subprocess.run(args, cwd=ROOT, capture_output=True, text=True,
-                                     timeout=20).stdout
+                                     encoding="utf-8", errors="replace", timeout=20).stdout
                 return self._json({"diff": out})
             if u.path == "/api/synctex/forward":
                 with SYNC_LOCK:
