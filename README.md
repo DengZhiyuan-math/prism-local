@@ -49,7 +49,60 @@ To use it on your own project:
 /path/to/prism-local/bin/prism-local
 ```
 
-Options: `--port 8765` and `--no-browser`. Stop the server with Ctrl-C.
+Options:
+
+- `--port 8765`: the port. `0` picks any free port.
+- `--port-tries N`: if the port is taken, try the next N−1 ports.
+- `--no-browser`: do not open a browser page.
+- `--exit-when-idle`: exit about 10 seconds after the last editor or PDF page is closed.
+- `--ready-file FILE`: once listening, write `{pid, port, url, root}` as JSON to FILE.
+
+Without `--exit-when-idle`, stop the server with Ctrl-C.
+
+## One-click launcher (Windows)
+
+`launcher/` turns a project into a Start menu and desktop shortcut:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File launcher\make-shortcut.ps1 -Project D:\path\to\paper
+```
+
+This creates **Prism · paper**. Clicking it:
+
+1. Opens another page if prism-local already runs for that project.
+2. Otherwise starts prism-local in the background, with no console window, and opens the
+   editor in an Edge or Chrome app window. Chrome is used when it is your default browser.
+   With Firefox as the default, or `-Browser default`, it opens a normal browser tab.
+3. Stops the server about 10 seconds after you close the last Prism page (editor or pop-out PDF).
+   Reloading a page does not stop it.
+
+Details:
+
+- **Stable port.** Each project always gets the same port, between 8800 and 9799, so the browser
+  keeps its open tabs and chat per project. If the port is taken, the next free one is used.
+- **Logs.** Server output goes to `%LOCALAPPDATA%\prism-local\logs\<project>-<hash>.log`. The
+  previous run is kept as `.log.1`. If the server cannot start, a dialog shows the end of the log.
+- **Running work.** A build or a Claude turn that is still running when the last page closes is
+  allowed to finish, for at most 10 minutes, before the server exits.
+- **Pages that vanish without closing.** A page that stops sending heartbeats counts as closed
+  after 2 minutes. This covers a crashed browser, and browsers that close tabs without running
+  their unload handlers.
+- **Sleep.** After the computer wakes up, open pages get a fresh 2 minutes to check in.
+- **Server gone.** If the server stopped while a page was still open, for example because the
+  browser discarded a background tab, the page says so. Click the shortcut again and the page
+  reconnects by itself.
+- **Environment.** The shortcut runs in your normal user environment, so `tectonic`, `latexmk`,
+  `git` and `claude` must be on your user `PATH`.
+- Options of `make-shortcut.ps1`: `-Name`, `-Browser app|default`, `-NoDesktop`, and `-Folder`
+  to put the shortcut somewhere else. To remove a shortcut, delete the `.lnk` file.
+
+The launcher can also be run directly, on any platform:
+
+```sh
+python launcher/prism_launcher.pyw /path/to/paper [--browser app|default|none] [--port N]
+```
+
+`launcher/make_icon.py` redraws `launcher/prism.ico`.
 
 ## Keyboard
 
@@ -149,6 +202,9 @@ prism-local is meant for a single user on their own machine.
 - Every state-changing request needs the header `X-Prism-Local: 1`. Browsers send a custom
   header cross-origin only after a CORS preflight, and the server never answers preflights, so
   other websites cannot drive the server.
+- The one exception is the goodbye a closing page sends with `navigator.sendBeacon`, which
+  cannot set headers. It must come from the same origin, and it only removes a page id that
+  has sent a heartbeat.
 - It reads and writes only text source files inside the project directory. Hidden directories
   and the build directory are excluded.
 - Anyone who can reach the port can run your build commands and the Claude agent. Do not expose
@@ -157,12 +213,15 @@ prism-local is meant for a single user on their own machine.
 ## Layout
 
 ```
-bin/prism-local            launcher
-prism_local/server.py      HTTP server: files, builds, log parsing, SyncTeX
+bin/prism-local            command-line launcher
+launcher/                  one-click launcher: prism_launcher.pyw, make-shortcut.ps1, icon
+prism_local/server.py      HTTP server: files, builds, log parsing, SyncTeX, idle exit
+prism_local/presence.py    which pages are open, for --exit-when-idle
 prism_local/agent.py       Claude Code runner, per-turn diffs and undo, usage limits
 prism_local/static/        front end (app.js, pdfview.js, viewer.*, common.js, app.css)
 prism_local/static/vendor/ CodeMirror 5.65.18 (MIT), PDF.js 3.11.174 (Apache-2.0)
 examples/minimal/          a small amsart project to try it on
+tests/                     python -m unittest discover -s tests
 ```
 
 ## Limitations

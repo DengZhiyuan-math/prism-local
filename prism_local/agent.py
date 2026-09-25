@@ -29,6 +29,25 @@ from typing import Callable
 
 MODES = {"edit": "acceptEdits", "ask": "plan"}
 
+# When the server runs without a console (started by the launcher), every console
+# program it starts (git, tectonic, claude) would otherwise flash its own window.
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Stop a process and its children (on Windows `claude` may be a .cmd shim around node)."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                       capture_output=True, timeout=15, **NO_WINDOW)
+    else:
+        proc.terminate()
+    try:
+        proc.wait(5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
 SYSTEM_APPEND = """\
 You are being driven from prism-local, a local LaTeX web editor, not the
 terminal. The author sees your text in a chat panel next to the LaTeX source
@@ -154,7 +173,8 @@ class AgentManager:
             # The prompt goes through stdin so it can never be parsed as a flag.
             job.proc = subprocess.Popen(cmd, cwd=root, stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                        text=True, encoding="utf-8", errors="replace", bufsize=1)
+                                        text=True, encoding="utf-8", errors="replace", bufsize=1,
+                                        **NO_WINDOW)
             job.proc.stdin.write(prompt)
             job.proc.stdin.close()
             threading.Thread(target=lambda: stderr_lines.extend(job.proc.stderr), daemon=True).start()
@@ -243,7 +263,7 @@ class AgentManager:
             try:
                 out = subprocess.run(cmd, input="ok", capture_output=True, text=True,
                                      encoding="utf-8", errors="replace", timeout=90,
-                                     cwd=tempfile.gettempdir()).stdout
+                                     cwd=tempfile.gettempdir(), **NO_WINDOW).stdout
             except subprocess.TimeoutExpired:
                 return {"error": "usage check timed out", "rate": self.rate}
             for line in out.splitlines():
@@ -260,9 +280,19 @@ class AgentManager:
     def stop(self, jid: int) -> dict:
         job = self.jobs.get(jid)
         if job and job.proc and job.proc.poll() is None:
-            job.proc.terminate()
+            kill_tree(job.proc)
             return {"ok": True}
         return {"ok": False}
+
+    def busy(self) -> bool:
+        job = self.active
+        return bool(job and not job.done)
+
+    def shutdown(self) -> None:
+        """Stop a turn that is still running when the server exits."""
+        job = self.active
+        if job and job.proc and job.proc.poll() is None:
+            kill_tree(job.proc)
 
     def undo(self, turn: int) -> dict:
         """Restore files changed in `turn`, only where they still match the turn's result."""

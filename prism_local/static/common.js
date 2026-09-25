@@ -33,3 +33,45 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => appl
 //   viewer -> editor: {type:"alive"} (heartbeat), {type:"bye"}, {type:"inverse", page, x, y}
 //   editor -> viewer: {type:"forward", r} (SyncTeX box), {type:"pdf", mtime}
 const pdfChannel = "BroadcastChannel" in window ? new BroadcastChannel("prism-pdf") : null;
+
+/* Page presence. Every page (editor, pop-out PDF) sends a heartbeat so a server started
+   with --exit-when-idle knows it is in use, and says goodbye when it closes. The goodbye
+   goes through sendBeacon, which survives page unload but cannot set X-Prism-Local; the
+   server accepts it only for a page id that has sent a heartbeat. */
+(function presence() {
+  const id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  let fails = 0, banner = null;
+
+  function showGone(on) {
+    if (on && !banner) {
+      banner = document.createElement("div");
+      banner.id = "server-gone";
+      banner.setAttribute("role", "alert");
+      banner.style.cssText = "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;" +
+        "justify-content:center;background:rgba(0,0,0,.45)";
+      banner.innerHTML = '<div style="background:var(--panel,#fff);color:var(--text,#111);' +
+        'border:1px solid var(--border,#ccc);border-radius:8px;padding:18px 22px;max-width:420px;' +
+        'font:14px/1.5 var(--sans,system-ui)"><b>prism-local is not running.</b><br>' +
+        "The server stopped, probably because every Prism page was closed. " +
+        "Start it again from its shortcut; this page reconnects by itself.</div>";
+      document.body.appendChild(banner);
+    } else if (!on && banner) {
+      banner.remove(); banner = null;
+    }
+  }
+
+  async function beat() {
+    try {
+      const r = await api("/api/presence", { client: id });
+      fails = r._status === 200 ? 0 : fails + 1;
+    } catch { fails += 1; }
+    showGone(fails >= 3);
+  }
+
+  window.addEventListener("pagehide", () => { navigator.sendBeacon("/api/bye", id); });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) beat(); });   // back/forward cache
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") beat(); });
+  beat();
+  setInterval(beat, 5000);
+})();

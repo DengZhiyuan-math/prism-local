@@ -5,6 +5,7 @@ Editor + PDF preview with SyncTeX + a Claude Code agent panel, served from
 127.0.0.1 with the Python standard library only.
 
     python3 prism_local/server.py [PROJECT_DIR] [--port 8765] [--no-browser]
+                                  [--exit-when-idle] [--port-tries N] [--ready-file F]
 
 Besides the configured build commands it runs only read-only `git status` /
 `git diff` and, for the Claude panel, the local Claude Code CLI (agent.py).
@@ -19,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -29,7 +31,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent import AgentManager, claude_bin  # noqa: E402
+from agent import NO_WINDOW, AgentManager, claude_bin  # noqa: E402
+from presence import Presence  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
 EDITABLE_SUFFIXES = {".tex", ".bib", ".md", ".sty", ".cls", ".bbx", ".cbx", ".txt"}
@@ -164,7 +167,7 @@ def git_status() -> dict[str, str]:
     try:
         out = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=ROOT,
                              capture_output=True, text=True, encoding="utf-8", errors="replace",
-                             timeout=10).stdout
+                             timeout=10, **NO_WINDOW).stdout
     except Exception:
         return {}
     st = {}
@@ -370,7 +373,8 @@ def run_build(mode: str) -> dict:
         env = {**os.environ,
                "BIBINPUTS": os.pathsep.join([str(ROOT), os.environ.get("BIBINPUTS", "")])}
         proc = subprocess.run(CFG.expand(argv), cwd=ROOT, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=900, env=env)
+                              encoding="utf-8", errors="replace", timeout=900, env=env,
+                              **NO_WINDOW)
         out = proc.stdout + proc.stderr
         diags = parse_stdout(out)
         known = {(d["message"]) for d in diags}
@@ -494,6 +498,7 @@ class SyncTex:
 SYNC = SyncTex()
 SYNC_LOCK = threading.Lock()
 AGENT = AgentManager(lambda: ROOT, lambda: list_files())
+PRESENCE = Presence()
 
 
 # ---------------------------------------------------------------- http
@@ -536,6 +541,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._static("index.html")
             if u.path == "/viewer":
                 return self._static("viewer.html")
+            if u.path == "/api/ping":
+                return self._json({"app": "prism-local", "root": str(ROOT), "pid": os.getpid(),
+                                   "pages": PRESENCE.count()})
             if u.path == "/api/pdfstat":
                 return self._json({"mtime": mtime(CFG.pdf) if CFG.pdf.exists() else None})
             if u.path.startswith("/static/"):
@@ -577,7 +585,8 @@ class Handler(BaseHTTPRequestHandler):
                 if q.get("path"):
                     resolve(q["path"])
                 out = subprocess.run(args, cwd=ROOT, capture_output=True, text=True,
-                                     encoding="utf-8", errors="replace", timeout=20).stdout
+                                     encoding="utf-8", errors="replace", timeout=20,
+                                     **NO_WINDOW).stdout
                 return self._json({"diff": out})
             if u.path == "/api/synctex/forward":
                 with SYNC_LOCK:
@@ -604,15 +613,34 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, p.read_bytes(), MIME.get(p.suffix, "application/octet-stream"))
 
     # -- POST
+    def _same_origin(self) -> bool:
+        origin = self.headers.get("Origin")
+        return not origin or urlparse(origin).netloc == self.headers.get("Host")
+
     def do_POST(self):
+        u = urlparse(self.path)
+        # A closing page says goodbye with navigator.sendBeacon, which cannot set the
+        # custom header below. It only removes a page id that sent a heartbeat, and
+        # other sites cannot know those random ids.
+        if u.path == "/api/bye":
+            if not self._host_ok() or not self._same_origin():
+                return self._err(403, "forbidden")
+            n = max(0, min(int(self.headers.get("Content-Length") or 0), 200))
+            cid = self.rfile.read(n).decode("utf-8", "replace").strip()
+            return self._json({"ok": PRESENCE.bye(cid)})
         # Custom header forces a CORS preflight, which we never answer, so other
         # web pages cannot drive this server from the browser.
         if not self._host_ok() or self.headers.get("X-Prism-Local") != "1":
             return self._err(403, "forbidden")
-        u = urlparse(self.path)
         try:
             n = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(n) or b"{}")
+            if u.path == "/api/presence":
+                cid = body["client"]
+                if not isinstance(cid, str) or not 8 <= len(cid) <= 100:
+                    raise ValueError("bad client id")
+                PRESENCE.beat(cid)
+                return self._json({"ok": True})
             if u.path == "/api/file":
                 p = resolve(body["path"])
                 base = body.get("base_mtime")
@@ -641,32 +669,123 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(400, str(e))
 
 
+class Server(ThreadingHTTPServer):
+    # http.server sets SO_REUSEADDR, which on Windows lets a second server bind a port
+    # that is already in use. Ask for exclusive use there instead.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def log(msg: str) -> None:
+    print(time.strftime("%H:%M:%S ") + msg, flush=True)
+
+
+RESUME_GAP = 20.0      # seconds between watchdog ticks that mean the machine slept
+BUSY_CAP = 600.0       # longest wait for a running build or Claude turn before exiting
+
+
+def idle_watchdog(srv: ThreadingHTTPServer) -> None:
+    """Shut the server down once no page has been open for a while (see presence.py)."""
+    last_m, last_w, busy_since = time.monotonic(), time.time(), None
+    while True:
+        time.sleep(1.0)
+        m, w = time.monotonic(), time.time()
+        if m - last_m > RESUME_GAP or w - last_w > RESUME_GAP:
+            log("resumed after sleep; waiting for pages to check in again")
+            PRESENCE.resume()
+        last_m, last_w = m, w
+        if not PRESENCE.idle():
+            busy_since = None
+            continue
+        if BUILD_LOCK.locked() or AGENT.busy():
+            if busy_since is None:
+                busy_since = m
+                log("no open pages; waiting for the running build or Claude turn")
+            if m - busy_since < BUSY_CAP:
+                continue
+        log("no open pages; shutting down")
+        srv.shutdown()
+        return
+
+
+def write_ready_file(path: Path, info: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(info), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def remove_ready_file(path: Path) -> None:
+    try:
+        if json.loads(path.read_text(encoding="utf-8")).get("pid") == os.getpid():
+            path.unlink()
+    except (OSError, ValueError):
+        pass
+
+
 def main():
+    # Started without a console (pythonw), there is no stdout to print to.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = sys.stdout
     ap = argparse.ArgumentParser(description="prism-local: local LaTeX studio "
                                  "(editor, PDF + SyncTeX, Claude Code panel)")
     ap.add_argument("project", nargs="?", type=Path, default=Path.cwd(),
                     help="LaTeX project directory (default: current directory)")
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--port", type=int, default=8765, help="port (0: any free port)")
+    ap.add_argument("--port-tries", type=int, default=1,
+                    help="if the port is taken, try this many ports upwards")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--exit-when-idle", action="store_true",
+                    help="exit shortly after the last editor or PDF page is closed")
+    ap.add_argument("--ready-file", type=Path,
+                    help="once listening, write {pid, port, url, root} as JSON to this file")
+    ap.add_argument("--idle-timings", help=argparse.SUPPRESS)   # "first,grace,stale" for tests
     ap.add_argument("--root", type=Path, help=argparse.SUPPRESS)   # backwards compatible
     a = ap.parse_args()
     set_root(a.root or a.project)
+    if a.idle_timings:
+        f, g, st = (float(x) for x in a.idle_timings.split(","))
+        PRESENCE.first_wait, PRESENCE.grace, PRESENCE.stale = f, g, st
     if not (ROOT / CFG.main).is_file():
         print(f"prism-local: warning: main file {CFG.main} not found in {ROOT}", file=sys.stderr)
-    try:
-        srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
-    except OSError as e:
-        sys.exit(f"prism-local: cannot listen on 127.0.0.1:{a.port}: {e}")
-    url = f"http://127.0.0.1:{a.port}/"
+    srv, err = None, None
+    for port in range(a.port, a.port + max(1, a.port_tries)) if a.port else [0]:
+        try:
+            srv = Server(("127.0.0.1", port), Handler)
+            break
+        except OSError as e:
+            err = e
+    if srv is None:
+        sys.exit(f"prism-local: cannot listen on 127.0.0.1:{a.port}: {err}")
+    port = srv.server_address[1]
+    url = f"http://127.0.0.1:{port}/"
     modes = ", ".join(CFG.build) or "none (see README)"
+    stop = "closes after the last page" if a.exit_when_idle else "Ctrl-C to stop"
     print(f"prism-local: {url}\n  project: {ROOT}\n  main:    {CFG.main}\n"
-          f"  builds:  {modes}\n  Ctrl-C to stop", flush=True)
+          f"  builds:  {modes}\n  {stop}", flush=True)
+    if a.ready_file:
+        write_ready_file(a.ready_file, {"app": "prism-local", "pid": os.getpid(), "port": port,
+                                        "url": url, "root": str(ROOT)})
     if not a.no_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    if a.exit_when_idle:
+        threading.Thread(target=idle_watchdog, args=(srv,), daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        AGENT.shutdown()
+        srv.server_close()
+        if a.ready_file:
+            remove_ready_file(a.ready_file)
+        log("stopped")
 
 
 if __name__ == "__main__":
