@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Prism launcher: open a LaTeX project in prism-local with one click.
 
-    pythonw launcher/prism_launcher.pyw PROJECT_DIR [--browser app|default|none] [--port N]
+    pythonw launcher/prism_launcher.pyw PROJECT_DIR [--browser window|app|default|none] [--port N]
 
 1. If prism-local already runs for PROJECT_DIR, open another page on it and exit.
 2. Otherwise start prism-local with --exit-when-idle, wait until it answers,
-   and open the page (by default as an Edge/Chrome app window).
+   and open the page (by default in a new Chrome/Edge window of its own, where
+   the pop-out PDF opens as a second tab).
 3. Wait for the server. It exits by itself shortly after its last page is
    closed; the launcher then exits too.
 
@@ -202,7 +203,7 @@ def default_browser_progid() -> str:
         return ""
 
 
-def app_browser() -> str | None:
+def chromium_browser() -> str | None:
     """Edge or Chrome, whichever is the default browser; Edge first otherwise."""
     if not WIN:
         return next((b for b in (shutil.which(n) for n in
@@ -210,7 +211,7 @@ def app_browser() -> str | None:
                                   "microsoft-edge")) if b), None)
     progid = default_browser_progid().lower()
     if "firefox" in progid:
-        return None                 # no app windows; use the ordinary default browser
+        return None                 # use the ordinary default browser
     edge, chrome = [], []
     for env in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
         base = os.environ.get(env)
@@ -221,16 +222,27 @@ def app_browser() -> str | None:
     return next((str(p) for p in order if p.exists()), None)
 
 
+def browser_command(url: str, mode: str, exe: str | None) -> list[str] | None:
+    """How to start Chrome/Edge for `mode`, or None for the default browser.
+
+    window: a new ordinary window with a tab strip, holding only Prism; the pop-out
+            PDF (window.open) then opens as a tab in that same window.
+    app:    an app window without tabs or address bar; the pop-out PDF gets its own
+            app window.
+    """
+    if not exe or mode not in ("window", "app"):
+        return None
+    return [exe, "--new-window", url] if mode == "window" else [exe, f"--app={url}"]
+
+
 def open_page(url: str, mode: str) -> None:
     if mode == "none":
         return
-    if mode == "app":
-        exe = app_browser()
-        if exe:
-            subprocess.Popen([exe, f"--app={url}"], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             close_fds=True)
-            return
+    cmd = browser_command(url, mode, chromium_browser())
+    if cmd:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True)
+        return
     if WIN:
         os.startfile(url)
     else:
@@ -243,8 +255,9 @@ def main() -> int:
     global QUIET
     ap = argparse.ArgumentParser(description="Open a LaTeX project in prism-local.")
     ap.add_argument("project", type=Path, help="LaTeX project directory")
-    ap.add_argument("--browser", choices=("app", "default", "none"), default="app",
-                    help="app: Edge/Chrome app window (default); default: default browser")
+    ap.add_argument("--browser", choices=("window", "app", "default", "none"), default="window",
+                    help="window: new Chrome/Edge window of its own (default); app: app window "
+                         "without tabs; default: a tab in the default browser")
     ap.add_argument("--port", type=int, help="preferred port (default: stable per project)")
     ap.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)  # no dialogs (tests)
     ap.add_argument("--idle-timings", help=argparse.SUPPRESS)                # passed to server

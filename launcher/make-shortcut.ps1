@@ -11,12 +11,17 @@
   powershell -ExecutionPolicy Bypass -File launcher\make-shortcut.ps1 -Project D:\DynNum
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File launcher\make-shortcut.ps1 -Project D:\DynNum -Name "DynNum paper" -Browser default -NoDesktop
+  powershell -ExecutionPolicy Bypass -File launcher\make-shortcut.ps1 -Project D:\DynNum -Name "DynNum paper" -Browser app -NoDesktop
+
+.PARAMETER Browser
+  window (default): a new Chrome/Edge window of its own; the pop-out PDF opens as a tab in it.
+  app: an app window without tabs or address bar; the pop-out PDF opens in its own window.
+  default: a tab in the default browser's current window.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Project,
     [string]$Name,
-    [ValidateSet("app", "default")][string]$Browser = "app",
+    [ValidateSet("window", "app", "default")][string]$Browser = "window",
     [switch]$NoDesktop,
     [string]$Folder          # create the shortcut only in this folder
 )

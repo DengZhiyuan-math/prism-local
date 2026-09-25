@@ -71,8 +71,8 @@ This creates **Prism · paper**. Clicking it:
 
 1. Opens another page if prism-local already runs for that project.
 2. Otherwise starts prism-local in the background, with no console window, and opens the
-   editor in an Edge or Chrome app window. Chrome is used when it is your default browser.
-   With Firefox as the default, or `-Browser default`, it opens a normal browser tab.
+   editor in a new Chrome or Edge window of its own. Chrome is used when it is your default
+   browser. The pop-out PDF opens as a second tab in that window.
 3. Stops the server about 10 seconds after you close the last Prism page (editor or pop-out PDF).
    Reloading a page does not stop it.
 
@@ -93,13 +93,19 @@ Details:
   reconnects by itself.
 - **Environment.** The shortcut runs in your normal user environment, so `tectonic`, `latexmk`,
   `git` and `claude` must be on your user `PATH`.
-- Options of `make-shortcut.ps1`: `-Name`, `-Browser app|default`, `-NoDesktop`, and `-Folder`
-  to put the shortcut somewhere else. To remove a shortcut, delete the `.lnk` file.
+- **Browser modes.** `-Browser` picks how the editor opens:
+  - `window`, the default: a new Chrome or Edge window with a tab strip, holding only Prism.
+  - `app`: an app window without tabs or address bar. The pop-out PDF then gets its own app
+    window, which suits a second monitor.
+  - `default`: a tab in your default browser's current window. With Firefox as the default
+    browser, every mode behaves like this.
+- Other options of `make-shortcut.ps1`: `-Name`, `-NoDesktop`, and `-Folder` to put the
+  shortcut somewhere else. To remove a shortcut, delete the `.lnk` file.
 
 The launcher can also be run directly, on any platform:
 
 ```sh
-python launcher/prism_launcher.pyw /path/to/paper [--browser app|default|none] [--port N]
+python launcher/prism_launcher.pyw /path/to/paper [--browser window|app|default|none] [--port N]
 ```
 
 `launcher/make_icon.py` redraws `launcher/prism.ico`.
