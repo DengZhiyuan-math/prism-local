@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import registry  # noqa: E402
-from presence import Presence  # noqa: E402
+from presence import Presence, serve_stream, valid_id  # noqa: E402
 from server import (EDITABLE_SUFFIXES, MIME, SKIP_DIRS, STATIC, Server,  # noqa: E402
                     log, remove_ready_file, write_ready_file)
 from agent import NO_WINDOW  # noqa: E402
@@ -363,7 +363,7 @@ def open_project(pid: str) -> dict:
     root = Path(entry_for(pid)["path"])
     if not root.is_dir():
         return {"error": f"folder not found: {root}"}
-    r = registry.launch(root)
+    r = registry.ensure_server(root)
     if "url" in r:
         registry.safe_touch(root)
     return r
@@ -446,6 +446,14 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/ping":
                 return self._json({"app": "prism-home", "pid": os.getpid(),
                                    "pages": PRESENCE.count()})
+            if u.path == "/api/presence/stream":
+                # Only this app's own pages may hold the server open.
+                site = self.headers.get("Sec-Fetch-Site", "same-origin")
+                if not self._same_origin() or site not in ("same-origin", "none"):
+                    return self._err(403, "forbidden")
+                if not valid_id(q.get("client")):
+                    return self._err(400, "bad client id")
+                return serve_stream(self, PRESENCE, q["client"])
             if u.path == "/api/projects":
                 return self._json(list_projects())
             if u.path == "/api/git":
@@ -482,7 +490,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
             if u.path == "/api/presence":
                 cid = body["client"]
-                if not isinstance(cid, str) or not 8 <= len(cid) <= 100:
+                if not valid_id(cid):
                     raise ValueError("bad client id")
                 PRESENCE.beat(cid)
                 return self._json({"ok": True})

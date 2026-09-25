@@ -198,46 +198,68 @@ def safe_touch(project: Path) -> None:
 
 # ---------------------------------------------------------------- starting servers
 
-LAUNCHER = Path(__file__).resolve().parent.parent / "launcher" / "prism_launcher.pyw"
+PKG = Path(__file__).resolve().parent
+SERVER, HUB = PKG / "server.py", PKG / "hub.py"
+READY_TIMEOUT = 30.0
 
 
-def spawn_detached(cmd: list[str], cwd: Path | None = None) -> None:
-    """Start a process that outlives its parent and opens no console window."""
-    import subprocess
-    kw = ({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
-          if WIN else {"start_new_session": True})
-    subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, close_fds=True,
-                     env={**os.environ, "PYTHONIOENCODING": "utf-8"}, **kw)
-
-
-def launch(project: Path | None, timeout: float = 40.0) -> dict:
-    """Make sure a server runs for `project` (None: the Home page) and return
-    {"url": ...} or {"error": ...}. The launcher owns the server: it starts it with
-    --exit-when-idle, so the server stops after its last page is closed. The caller
-    must open a page within a minute, or the new server gives up and exits."""
+def server_python() -> str:
+    """python.exe rather than pythonw.exe: the server then has a (hidden) console that
+    its build and git subprocesses share, and a real stdout for the log."""
     import sys
-    if project is None:
-        key, app, args = HOME_KEY, "prism-home", ["--home"]
-    else:
-        key, app, args = project_key(project), "prism-local", [str(project)]
-    inst = instance_file(key)
-    info = running_instance(inst, app, project)
-    if info:
-        return {"url": info["url"], "started": False}
-    if not LAUNCHER.is_file():
-        return {"error": f"launcher not found: {LAUNCHER}"}
-    spawn_detached([sys.executable, str(LAUNCHER), *args, "--browser", "none"],
-                   cwd=project or Path.home())
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        time.sleep(0.15)
-        info = running_instance(inst, app, project, timeout=1.0, cleanup=False)
-        if info:
-            return {"url": info["url"], "started": True}
-    log = log_file(key)
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe" and exe.with_name("python.exe").exists():
+        return str(exe.with_name("python.exe"))
+    return sys.executable
+
+
+def tail(path: Path, lines: int = 15) -> str:
     try:
-        last = "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-12:])
+        return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
     except OSError:
-        last = ""
-    return {"error": "the server did not start in time", "log": last, "logfile": str(log)}
+        return ""
+
+
+def ensure_server(project: Path | None, port: int | None = None, extra: list[str] = (),
+                  timeout: float = READY_TIMEOUT) -> dict:
+    """Make sure a server runs for `project` (None: the Home page).
+
+    Returns {"url", "started"} or {"error", "log", "logfile"}. A new server is started
+    detached with --exit-when-idle: nothing waits for it, it removes its own instance
+    file and stops by itself shortly after its last page is closed (or after a minute
+    if no page ever connects). The lock keeps two quick clicks, or the launcher and
+    the Home page, from starting two servers for the same project."""
+    import subprocess
+    if project is None:
+        key, app, script, target, cwd = HOME_KEY, "prism-home", HUB, [], Path.home()
+        port, tries = port or HOME_PORT, HOME_PORT_TRIES
+    else:
+        project = Path(project).resolve()
+        key, app, script, target, cwd = project_key(project), "prism-local", SERVER, [str(project)], project
+        port, tries = port or preferred_port(project), PORT_TRIES
+    inst, log = instance_file(key), log_file(key)
+    with FileLock(inst.with_suffix(".lock")):
+        info = running_instance(inst, app, project)
+        if info:
+            return {"url": info["url"], "started": False}
+        log.parent.mkdir(parents=True, exist_ok=True)
+        if log.exists():
+            os.replace(log, log.with_name(log.name + ".1"))
+        cmd = [server_python(), "-u", str(script), *target, "--port", str(port),
+               "--port-tries", str(tries), "--no-browser", "--exit-when-idle",
+               "--ready-file", str(inst), *extra]
+        kw = ({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
+              if WIN else {"start_new_session": True})
+        with open(log, "w", encoding="utf-8") as logf:     # the child keeps its own handle
+            proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=logf,
+                                    stderr=subprocess.STDOUT, close_fds=True,
+                                    env={**os.environ, "PYTHONIOENCODING": "utf-8"}, **kw)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and proc.poll() is None:
+            info = running_instance(inst, app, project, timeout=1.0, cleanup=False)
+            if info and info.get("pid") == proc.pid:
+                return {"url": info["url"], "started": True}
+            time.sleep(0.1)
+        if proc.poll() is None:
+            proc.kill()
+    return {"error": "the server did not start", "log": tail(log), "logfile": str(log)}

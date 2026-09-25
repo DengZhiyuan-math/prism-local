@@ -98,6 +98,30 @@ class PresenceTest(unittest.TestCase):
         self.tick(9)
         self.assertFalse(self.p.idle())
 
+    def test_open_stream_never_goes_stale(self):
+        self.p.hold("a")
+        self.tick(3600)                      # hidden tab: no heartbeats at all
+        self.assertEqual(self.p.count(), 1)
+        self.assertFalse(self.p.idle())
+
+    def test_closed_stream_means_gone(self):
+        self.p.hold("a")
+        self.tick(30)
+        self.p.release("a")
+        self.assertEqual(self.p.count(), 0)
+        self.tick(9)
+        self.assertFalse(self.p.idle())
+        self.tick(2)
+        self.assertTrue(self.p.idle())
+
+    def test_second_stream_of_same_page(self):
+        self.p.hold("a")
+        self.p.hold("a")                     # EventSource reconnected before the old one closed
+        self.p.release("a")
+        self.assertEqual(self.p.count(), 1)
+        self.p.release("a")
+        self.assertEqual(self.p.count(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

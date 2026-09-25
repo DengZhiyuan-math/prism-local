@@ -118,16 +118,22 @@ This creates **Prism · paper**. Clicking a project shortcut:
 
 Details:
 
+- **Processes.** The launcher exits as soon as the page is open. What stays behind is one
+  `python.exe` (with its hidden `conhost.exe`) for the Home page and one for each open project.
+  Nothing else waits in the background.
+- **How a closed page is noticed.** Every page keeps a connection (an event stream) open to its
+  server. When you close the page, the tab or the whole browser window, the connection drops and
+  the server knows at once, even if the page had no time to say goodbye.
 - **Stable port.** Each project always gets the same port, between 8800 and 9799, so the browser
   keeps its open tabs and chat per project. If the port is taken, the next free one is used.
 - **Logs.** Server output goes to `%LOCALAPPDATA%\prism-local\logs\<project>-<hash>.log`. The
   previous run is kept as `.log.1`. If the server cannot start, a dialog shows the end of the log.
 - **Running work.** A build or a Claude turn that is still running when the last page closes is
   allowed to finish, for at most 10 minutes, before the server exits.
-- **Pages that vanish without closing.** A page that stops sending heartbeats counts as closed
-  after 2 minutes. This covers a crashed browser, and browsers that close tabs without running
-  their unload handlers.
-- **Sleep.** After the computer wakes up, open pages get a fresh 2 minutes to check in.
+- **Fallback.** Pages also send heartbeats. In the rare case that the event stream cannot be
+  opened, a page that stops sending heartbeats counts as closed after 2 minutes.
+- **Sleep.** After the computer wakes up, pages without an open stream get a fresh 2 minutes
+  to check in.
 - **Server gone.** If the server stopped while a page was still open, for example because the
   browser discarded a background tab, the page says so. Click the shortcut again and the page
   reconnects by itself.
@@ -251,7 +257,8 @@ prism-local is meant for a single user on their own machine.
   other websites cannot drive the server.
 - The one exception is the goodbye a closing page sends with `navigator.sendBeacon`, which
   cannot set headers. It must come from the same origin, and it only removes a page id that
-  has sent a heartbeat.
+  has sent a heartbeat. The presence stream is a GET, and it is refused unless it comes from
+  the same origin, so other sites cannot keep the server running.
 - It reads and writes only text source files inside the project directory. Hidden directories
   and the build directory are excluded.
 - Anyone who can reach the port can run your build commands and the Claude agent. Do not expose

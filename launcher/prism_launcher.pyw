@@ -4,12 +4,12 @@
     pythonw launcher/prism_launcher.pyw PROJECT_DIR [--browser window|app|default|none] [--port N]
     pythonw launcher/prism_launcher.pyw --home      [--browser window|app|default|none]
 
-1. If prism-local already runs for PROJECT_DIR, open another page on it and exit.
+1. If prism-local already runs for PROJECT_DIR, open another page on it.
 2. Otherwise start prism-local with --exit-when-idle, wait until it answers,
    and open the page (by default in a new Chrome/Edge window of its own, where
    the pop-out PDF opens as a second tab).
-3. Wait for the server. It exits by itself shortly after its last page is
-   closed; the launcher then exits too.
+3. Exit. The server runs on its own and stops shortly after its last page is
+   closed, so no launcher process stays behind.
 
 --home (or no PROJECT_DIR) does the same for the Home page (prism_local/hub.py),
 which lists your projects and opens each one in its own prism-local server.
@@ -25,7 +25,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 import webbrowser
 from pathlib import Path
 
@@ -34,12 +33,8 @@ PKG = HERE.parent / "prism_local"
 SERVER = PKG / "server.py"
 HUB = PKG / "hub.py"
 sys.path.insert(0, str(PKG))
-from registry import (HOME_KEY, HOME_PORT, HOME_PORT_TRIES, PORT_TRIES, WIN,  # noqa: E402,F401
-                      FileLock, instance_file, log_file, preferred_port, project_key,
-                      read_json, running_instance, state_dir)
+from registry import WIN, ensure_server  # noqa: E402
 
-NO_WINDOW = subprocess.CREATE_NO_WINDOW if WIN else 0
-READY_TIMEOUT = 30.0
 QUIET = False
 
 
@@ -51,64 +46,6 @@ def message(text: str, error: bool = True) -> None:
         ctypes.windll.user32.MessageBoxW(None, text, "Prism", 0x10 if error else 0x40)
     elif sys.stderr is not None:
         print(f"prism-launcher: {text}", file=sys.stderr, flush=True)
-
-
-def tail(path: Path, lines: int = 15) -> str:
-    try:
-        return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
-    except OSError:
-        return ""
-
-
-def pid_alive(pid: int) -> bool:
-    if WIN:
-        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-                             capture_output=True, text=True, creationflags=NO_WINDOW).stdout
-        return f'"{pid}"' in out
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-# ---------------------------------------------------------------- server
-
-def server_python() -> str:
-    """python.exe rather than pythonw.exe: the server then has a (hidden) console that
-    its build and git subprocesses share, and a real stdout for the log."""
-    exe = Path(sys.executable)
-    if exe.name.lower() == "pythonw.exe" and exe.with_name("python.exe").exists():
-        return str(exe.with_name("python.exe"))
-    return sys.executable
-
-
-def start_server(script: Path, target: list[str], cwd: Path, port: int, tries: int,
-                 inst: Path, log: Path, extra: list[str]):
-    log.parent.mkdir(parents=True, exist_ok=True)
-    if log.exists():
-        os.replace(log, log.with_name(log.name + ".1"))
-    logf = open(log, "w", encoding="utf-8")
-    cmd = [server_python(), "-u", str(script), *target, "--port", str(port),
-           "--port-tries", str(tries), "--no-browser", "--exit-when-idle",
-           "--ready-file", str(inst), *extra]
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=logf,
-                            stderr=subprocess.STDOUT, env=env, creationflags=NO_WINDOW)
-    logf.close()                    # the child keeps its own handle
-    return proc
-
-
-def wait_ready(proc, inst: Path, app: str, root: Path | None) -> dict | None:
-    deadline = time.monotonic() + READY_TIMEOUT
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            return None
-        info = running_instance(inst, app, root, cleanup=False)
-        if info and info.get("pid") == proc.pid:
-            return info
-        time.sleep(0.1)
-    return None
 
 
 # ---------------------------------------------------------------- browser
@@ -191,9 +128,7 @@ def main() -> int:
         if not HUB.is_file():
             message(f"prism-local Home page not found:\n{HUB}")
             return 2
-        what, app, root, key = "the Home page", "prism-home", None, HOME_KEY
-        script, target, cwd = HUB, [], Path.home()
-        port, tries = a.port or HOME_PORT, HOME_PORT_TRIES
+        project, what = None, "the Home page"
     else:
         project = a.project.expanduser().resolve()
         if not project.is_dir():
@@ -202,36 +137,18 @@ def main() -> int:
         if not SERVER.is_file():
             message(f"prism-local server not found:\n{SERVER}")
             return 2
-        what, app, root, key = str(project), "prism-local", project, project_key(project)
-        script, target, cwd = SERVER, [str(project)], project
-        port, tries = a.port or preferred_port(project), PORT_TRIES
-    inst, log = instance_file(key), log_file(key)
+        what = str(project)
 
     try:
-        with FileLock(inst.with_suffix(".lock")):
-            info = running_instance(inst, app, root)
-            if info:
-                open_page(info["url"], a.browser)
-                return 0
-            proc = start_server(script, target, cwd, port, tries, inst, log, extra)
-            info = wait_ready(proc, inst, app, root)
-            if not info:
-                if proc.poll() is None:
-                    proc.kill()
-                message(f"prism-local did not start for\n{what}\n\n{tail(log)}\n\nLog: {log}")
-                return 1
+        r = ensure_server(project, a.port, extra)
     except TimeoutError as e:
         message(str(e))
         return 1
-
-    open_page(info["url"], a.browser)
-    rc = proc.wait()
-    info = read_json(inst)
-    if info and info.get("pid") == proc.pid:
-        inst.unlink()
-    if rc != 0:
-        message(f"prism-local stopped with an error (exit code {rc}).\n\n{tail(log)}\n\nLog: {log}")
-    return rc
+    if "error" in r:
+        message(f"prism-local did not start for\n{what}\n\n{r['log']}\n\nLog: {r['logfile']}")
+        return 1
+    open_page(r["url"], a.browser)
+    return 0
 
 
 if __name__ == "__main__":

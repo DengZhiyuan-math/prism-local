@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent import NO_WINDOW, AgentManager, claude_bin  # noqa: E402
-from presence import Presence  # noqa: E402
+from presence import Presence, serve_stream, valid_id  # noqa: E402
 import registry  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -545,6 +545,14 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/ping":
                 return self._json({"app": "prism-local", "root": str(ROOT), "pid": os.getpid(),
                                    "pages": PRESENCE.count()})
+            if u.path == "/api/presence/stream":
+                # Only this app's own pages may hold the server open.
+                site = self.headers.get("Sec-Fetch-Site", "same-origin")
+                if not self._same_origin() or site not in ("same-origin", "none"):
+                    return self._err(403, "forbidden")
+                if not valid_id(q.get("client")):
+                    return self._err(400, "bad client id")
+                return serve_stream(self, PRESENCE, q["client"])
             if u.path == "/api/pdfstat":
                 return self._json({"mtime": mtime(CFG.pdf) if CFG.pdf.exists() else None})
             if u.path.startswith("/static/"):
@@ -638,7 +646,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
             if u.path == "/api/presence":
                 cid = body["client"]
-                if not isinstance(cid, str) or not 8 <= len(cid) <= 100:
+                if not valid_id(cid):
                     raise ValueError("bad client id")
                 PRESENCE.beat(cid)
                 return self._json({"ok": True})
@@ -657,7 +665,7 @@ class Handler(BaseHTTPRequestHandler):
                                 body.get("mode", "ask"), body.get("model") or None)
                 return self._json(r, 409 if "error" in r else 200)
             if u.path == "/api/home":
-                r = registry.launch(None)
+                r = registry.ensure_server(None)
                 return self._json(r, 502 if "error" in r else 200)
             if u.path == "/api/agent/usage":
                 return self._json(AGENT.probe_rate())

@@ -42,6 +42,17 @@ def bye(url, cid, origin=None):
                     "Origin": origin or f"http://{host}"})
 
 
+def open_stream(url, cid, origin=None):
+    """Hold the page presence stream open like a browser's EventSource."""
+    host, port = url.split("//")[1].rstrip("/").split(":")
+    sock = socket.create_connection((host, int(port)), timeout=5)
+    extra = f"Origin: {origin}\r\n" if origin else ""
+    sock.sendall(f"GET /api/presence/stream?client={cid} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+                 f"Accept: text/event-stream\r\n{extra}\r\n".encode())
+    head = sock.recv(200).decode("latin-1")
+    return sock, int(head.split()[1])
+
+
 def stop(proc):
     if proc.poll() is None:
         proc.kill()
@@ -121,6 +132,25 @@ class ServerLifecycle(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(request(url, "/api/ping")[1]["pages"], 1)
 
+    def test_closing_the_stream_exits_without_goodbye(self):
+        url = self.start("30,1.5,120")
+        sock, status = open_stream(url, "stream-page-01")
+        self.assertEqual(status, 200)
+        time.sleep(1)
+        self.assertEqual(request(url, "/api/ping")[1]["pages"], 1)
+        time.sleep(3)                   # no heartbeats, still open
+        self.assertIsNone(self.proc.poll())
+        sock.close()                    # the browser closed: no goodbye is sent
+        t0 = time.monotonic()
+        self.assertExitsWithin(1, 5, t0)
+
+    def test_stream_from_other_sites_is_refused(self):
+        url = self.start("30,1,30")
+        sock, status = open_stream(url, "evil-page-001", origin="https://evil.example")
+        sock.close()
+        self.assertEqual(status, 403)
+        self.assertEqual(request(url, "/api/ping")[1]["pages"], 0)
+
     def test_port_in_use_moves_up(self):
         blocker = socket.socket()
         blocker.bind(("127.0.0.1", 0))
@@ -134,36 +164,37 @@ class ServerLifecycle(unittest.TestCase):
 
 
 class LauncherLifecycle(unittest.TestCase):
-    def test_single_instance_and_exit(self):
+    def test_launcher_starts_server_and_exits(self):
         state = Path(tempfile.mkdtemp())
         env = {**os.environ, "PRISM_STATE_DIR": str(state)}
         cmd = [sys.executable, str(LAUNCHER), str(PROJECT), "--browser", "none", "--quiet",
                "--idle-timings", "30,1,30"]
-        first = subprocess.Popen(cmd, env=env, creationflags=NO_WINDOW)
-        self.addCleanup(stop, first)
-        inst = None
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and not inst:
-            found = list((state / "instances").glob("*.json")) if (state / "instances").exists() else []
-            inst = found[0] if found else None
-            time.sleep(0.1)
-        self.assertIsNotNone(inst, "launcher did not start a server")
-        info = wait_file(inst)
+        # The launcher starts the server and exits; it does not stay behind.
+        first = subprocess.run(cmd, env=env, timeout=40, creationflags=NO_WINDOW)
+        self.assertEqual(first.returncode, 0)
+        insts = list((state / "instances").glob("*.json"))
+        self.assertEqual(len(insts), 1)
+        info = wait_file(insts[0])
         url = info["url"]
+        self.addCleanup(lambda: subprocess.run(
+            ["taskkill", "/F", "/PID", str(info["pid"])] if os.name == "nt" else
+            ["kill", str(info["pid"])], capture_output=True))
         self.assertEqual(beat(url, "launched-page-1")[0], 200)
 
-        # A second click reuses the running server and exits at once.
-        t0 = time.monotonic()
+        # A second click reuses the running server.
         second = subprocess.run(cmd, env=env, timeout=20, creationflags=NO_WINDOW)
         self.assertEqual(second.returncode, 0)
-        self.assertLess(time.monotonic() - t0, 10)
         self.assertEqual(request(url, "/api/ping")[1]["pid"], info["pid"])
         self.assertEqual(len(list((state / "instances").glob("*.json"))), 1)
 
-        # Closing the last page stops the server, then the launcher.
+        # Closing the last page stops the server, which removes its instance file.
         bye(url, "launched-page-1")
-        self.assertEqual(first.wait(15), 0)
-        self.assertFalse(inst.exists())
+        deadline = time.monotonic() + 15
+        while insts[0].exists() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        self.assertFalse(insts[0].exists())
+        with self.assertRaises(OSError):
+            HTTP.open(url + "api/ping", timeout=2)
         self.assertTrue(list((state / "logs").glob("*.log")))
 
 

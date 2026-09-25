@@ -69,8 +69,21 @@ const pdfChannel = "BroadcastChannel" in window ? new BroadcastChannel("prism-pd
     showGone(fails >= 3);
   }
 
-  window.addEventListener("pagehide", () => { navigator.sendBeacon("/api/bye", id); });
-  window.addEventListener("pageshow", (e) => { if (e.persisted) beat(); });   // back/forward cache
+  // The open stream is what keeps the server alive: when this page, its tab or the
+  // whole browser closes, the connection drops and the server notices at once, even
+  // if the goodbye below never gets out. EventSource reconnects by itself.
+  let stream = null;
+  function hold() {
+    if (!("EventSource" in window) || stream) return;
+    stream = new EventSource("/api/presence/stream?client=" + encodeURIComponent(id));
+  }
+
+  window.addEventListener("pagehide", () => {
+    if (stream) { stream.close(); stream = null; }
+    navigator.sendBeacon("/api/bye", id);
+  });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) { hold(); beat(); } });   // back/forward cache
+  hold();
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") beat(); });
   beat();
   setInterval(beat, 5000);
