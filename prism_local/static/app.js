@@ -15,6 +15,25 @@ $("#btn-theme").onclick = () => {
   store.set("theme", next); applyTheme(next);
 };
 
+/* ------------------------------------------------------------------ home */
+// The Home page (hub.py) lists all projects. Its tab calls itself "prism-home", so this
+// finds and reuses it when it opened us; the server starts the Home page if needed.
+$("#btn-home").onclick = async () => {
+  const w = window.open("", "prism-home");
+  let fresh = true;
+  try { fresh = !!w && w.location.href === "about:blank"; } catch { fresh = false; }
+  if (w && fresh) w.document.body.innerHTML = '<p style="font:15px system-ui;color:#6f6a60;margin:40vh auto;text-align:center">Opening your projects…</p>';
+  const r = await api("/api/home", {}).catch(() => ({ error: "server not reachable" }));
+  if (r.url) {
+    // An existing Home tab only needs to load again if its server had to be restarted.
+    if (!w) location.href = r.url;
+    else { if (fresh || r.started) w.location.href = r.url; w.focus(); }
+  } else {
+    if (w && fresh) w.close();
+    alert("Could not open the Home page: " + (r.error || "unknown error") + (r.log ? "\n\n" + r.log : ""));
+  }
+};
+
 /* ------------------------------------------------------------------ editor */
 const cm = CodeMirror($("#editor"), {
   lineNumbers: true, lineWrapping: true, matchBrackets: true, autoCloseBrackets: "()[]{}$$",

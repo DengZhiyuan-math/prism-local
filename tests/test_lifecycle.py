@@ -65,7 +65,8 @@ class ServerLifecycle(unittest.TestCase):
         self.proc = subprocess.Popen(
             [sys.executable, str(SERVER), str(PROJECT), "--port", "0", "--no-browser",
              "--exit-when-idle", "--idle-timings", timings, "--ready-file", str(self.ready),
-             *extra], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+             *extra], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NO_WINDOW,
+            env={**os.environ, "PRISM_STATE_DIR": str(self.tmp / "state")})
         self.addCleanup(self.proc.stdout.close)
         self.addCleanup(stop, self.proc)
         return wait_file(self.ready)["url"]

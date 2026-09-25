@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Creates Start menu and desktop shortcuts that open a LaTeX project in prism-local.
+  Creates Start menu and desktop shortcuts that open a LaTeX project, or the
+  Prism Home page with all your projects, in prism-local.
 
 .DESCRIPTION
   The shortcut runs launcher\prism_launcher.pyw with pythonw.exe, so no console
@@ -8,10 +9,17 @@
   running one) and opens the editor; closing the last Prism page stops it.
 
 .EXAMPLE
+  powershell -ExecutionPolicy Bypass -File launcher\make-shortcut.ps1 -Home
+
+.EXAMPLE
   powershell -ExecutionPolicy Bypass -File launcher\make-shortcut.ps1 -Project D:\DynNum
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File launcher\make-shortcut.ps1 -Project D:\DynNum -Name "DynNum paper" -Browser app -NoDesktop
+
+.PARAMETER HomePage
+  Create a shortcut named "Prism" for the Home page, which lists your projects and
+  opens each one. This is what you get when -Project is left out.
 
 .PARAMETER Browser
   window (default): a new Chrome/Edge window of its own; the pop-out PDF opens as a tab in it.
@@ -19,7 +27,8 @@
   default: a tab in the default browser's current window.
 #>
 param(
-    [Parameter(Mandatory = $true)][string]$Project,
+    [string]$Project,
+    [Alias("Home")][switch]$HomePage,
     [string]$Name,
     [ValidateSet("window", "app", "default")][string]$Browser = "window",
     [switch]$NoDesktop,
@@ -27,9 +36,14 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-$Project = (Resolve-Path -LiteralPath $Project).Path
-if ($Project.Length -gt 3) { $Project = $Project.TrimEnd('\') }   # a trailing \ would escape the quote
-if (-not $Name) { $Name = "Prism " + [char]0x00B7 + " " + (Split-Path $Project -Leaf) }
+$HomePage = $HomePage -or -not $Project
+if (-not $HomePage) {
+    $Project = (Resolve-Path -LiteralPath $Project).Path
+    if ($Project.Length -gt 3) { $Project = $Project.TrimEnd('\') }   # a trailing \ would escape the quote
+}
+if (-not $Name) {
+    $Name = if ($HomePage) { "Prism" } else { "Prism " + [char]0x00B7 + " " + (Split-Path $Project -Leaf) }
+}
 
 $launcher = Join-Path $PSScriptRoot "prism_launcher.pyw"
 $icon = Join-Path $PSScriptRoot "prism.ico"
@@ -70,12 +84,18 @@ foreach ($dir in $folders) {
     Move-Item -LiteralPath $tmp -Destination $path -Force
     $link = $app.Namespace($dir).ParseName("$Name.lnk").GetLink
     $link.Path = $pythonw
-    $link.Arguments = "`"$launcher`" `"$Project`" --browser $Browser"
-    $link.WorkingDirectory = $Project
-    $link.Description = "Open $Project in prism-local"
+    if ($HomePage) {
+        $link.Arguments = "`"$launcher`" --home --browser $Browser"
+        $link.WorkingDirectory = $env:USERPROFILE
+        $link.Description = "Open the Prism Home page with your LaTeX projects"
+    } else {
+        $link.Arguments = "`"$launcher`" `"$Project`" --browser $Browser"
+        $link.WorkingDirectory = $Project
+        $link.Description = "Open $Project in prism-local"
+    }
     if (Test-Path -LiteralPath $icon) { $link.SetIconLocation($icon, 0) }
     $link.Save()
     Write-Host "Created $path"
 }
 Write-Host "Python:  $pythonw"
-Write-Host "Project: $Project"
+Write-Host $(if ($HomePage) { "Home page" } else { "Project: $Project" })

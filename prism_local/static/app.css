@@ -79,7 +79,8 @@ button:disabled { opacity: .5; cursor: default; }
 
 #sidebar.hidden, #sidebar-gutter.hidden { display: none; }
 #btn-popout.active { border-color: var(--accent); color: var(--accent); }
-#btn-sidebar { font-size: 14px; padding: 1px 7px; }
+#btn-sidebar, #btn-home { font-size: 14px; padding: 1px 7px; }
+#top #btn-home { margin-left: -10px; }
 .gutter { width: 5px; flex: none; cursor: col-resize; background: var(--border); }
 .gutter:hover, .gutter.drag { background: var(--accent); }
 

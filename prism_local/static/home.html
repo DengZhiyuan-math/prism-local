@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Projects · prism-local</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/home.css">
+</head>
+<body class="home">
+<header id="home-top">
+  <div class="brand"><span class="logo">∂</span> Prism <span class="sub">Projects</span></div>
+  <input id="search" type="search" placeholder="Search projects…  ( / )" autocomplete="off" spellcheck="false">
+  <select id="sort" title="Sort order">
+    <option value="opened">Recently opened</option>
+    <option value="edited">Recently edited</option>
+    <option value="name">Name</option>
+  </select>
+  <div class="actions right">
+    <button id="btn-add" title="Add an existing LaTeX folder to this list">Add folder…</button>
+    <button id="btn-new" class="primary" title="Create a new LaTeX project from a template">+ New project</button>
+    <button id="btn-theme" title="Toggle light/dark">◐</button>
+  </div>
+</header>
+
+<main id="home-main">
+  <div id="summary" class="summary"></div>
+  <section id="sec-pinned" hidden>
+    <h2>Pinned</h2>
+    <div class="grid" id="grid-pinned"></div>
+  </section>
+  <section id="sec-all" hidden>
+    <h2 id="all-title">All projects</h2>
+    <div class="grid" id="grid-all"></div>
+  </section>
+  <div id="no-match" class="empty-note" hidden>No project matches your search.</div>
+  <div id="welcome" class="welcome" hidden>
+    <div class="logo big">∂</div>
+    <h1>Your LaTeX projects, in one place</h1>
+    <p>Create a new paper from a template, or add a folder you already work in.
+       Projects you open with prism-local show up here automatically.</p>
+    <div class="welcome-actions">
+      <button class="primary" data-act="new">+ New project</button>
+      <button data-act="add">Add existing folder…</button>
+    </div>
+  </div>
+</main>
+
+<div id="menu" class="menu" role="menu" hidden></div>
+<div id="toast" role="status" hidden></div>
+
+<dialog id="dlg-new">
+  <form method="dialog" id="form-new">
+    <h3>New project</h3>
+    <label class="field"><span>Folder name</span>
+      <input name="name" required placeholder="my-paper" autocomplete="off" spellcheck="false"></label>
+    <label class="field"><span>Location</span>
+      <span class="row"><input name="parent" required spellcheck="false">
+        <button type="button" data-browse="parent">Browse…</button></span></label>
+    <div class="will-create" id="new-target"></div>
+    <label class="field"><span>Title <i>(optional)</i></span><input name="title" autocomplete="off"></label>
+    <label class="field"><span>Author <i>(optional)</i></span><input name="author" autocomplete="off"></label>
+    <fieldset class="templates">
+      <legend>Template</legend>
+      <label><input type="radio" name="template" value="amsart" checked>
+        <b>Math paper</b><small>amsart, theorem environments, cleveref, sections/, refs.bib</small></label>
+      <label><input type="radio" name="template" value="article">
+        <b>Article</b><small>plain article with amsmath and hyperref</small></label>
+      <label><input type="radio" name="template" value="empty">
+        <b>Empty</b><small>just \documentclass and a document body</small></label>
+    </fieldset>
+    <label class="check"><input type="checkbox" name="git" checked> Initialize a git repository</label>
+    <label class="check"><input type="checkbox" name="open" checked> Open it after creating</label>
+    <div class="dlg-error" hidden></div>
+    <div class="dlg-actions">
+      <button type="button" value="cancel" data-close>Cancel</button>
+      <button type="submit" class="primary">Create</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-add">
+  <form method="dialog" id="form-add">
+    <h3>Add existing folder</h3>
+    <label class="field"><span>Folder</span>
+      <span class="row"><input name="path" required placeholder="D:\papers\my-paper" spellcheck="false">
+        <button type="button" data-browse="path">Browse…</button></span></label>
+    <p class="hint">The folder is only added to this list; nothing in it is changed.</p>
+    <div class="dlg-error" hidden></div>
+    <div class="dlg-actions">
+      <button type="button" data-close>Cancel</button>
+      <button type="submit" class="primary">Add</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-rename">
+  <form method="dialog" id="form-rename">
+    <h3>Rename in list</h3>
+    <label class="field"><span>Display name</span><input name="name" autocomplete="off"></label>
+    <p class="hint">Only the name shown here changes. Leave it empty to use the folder name.</p>
+    <div class="dlg-actions">
+      <button type="button" data-close>Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/vendor/pdf.js"></script>
+<script src="/static/common.js"></script>
+<script src="/static/home.js"></script>
+</body>
+</html>

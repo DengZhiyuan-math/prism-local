@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent import NO_WINDOW, AgentManager, claude_bin  # noqa: E402
 from presence import Presence  # noqa: E402
+import registry  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
 EDITABLE_SUFFIXES = {".tex", ".bib", ".md", ".sty", ".cls", ".bbx", ".cbx", ".txt"}
@@ -655,6 +656,9 @@ class Handler(BaseHTTPRequestHandler):
                 r = AGENT.start(body["prompt"], body.get("session_id") or None,
                                 body.get("mode", "ask"), body.get("model") or None)
                 return self._json(r, 409 if "error" in r else 200)
+            if u.path == "/api/home":
+                r = registry.launch(None)
+                return self._json(r, 502 if "error" in r else 200)
             if u.path == "/api/agent/usage":
                 return self._json(AGENT.probe_rate())
             if u.path == "/api/agent/stop":
@@ -769,6 +773,7 @@ def main():
     stop = "closes after the last page" if a.exit_when_idle else "Ctrl-C to stop"
     print(f"prism-local: {url}\n  project: {ROOT}\n  main:    {CFG.main}\n"
           f"  builds:  {modes}\n  {stop}", flush=True)
+    registry.safe_touch(ROOT)       # list the project on the Home page
     if a.ready_file:
         write_ready_file(a.ready_file, {"app": "prism-local", "pid": os.getpid(), "port": port,
                                         "url": url, "root": str(ROOT)})

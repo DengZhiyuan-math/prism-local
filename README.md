@@ -15,6 +15,9 @@ A local, Overleaf/Prism-style studio for LaTeX projects on your own machine:
   [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI in the project directory.
   Every turn ends with a per-file diff and **Undo this turn**. The panel also shows your
   remaining 5-hour and 7-day Claude usage limits.
+- **Home page**: all your projects in one place, with PDF thumbnails, titles, git state and
+  which ones are open. Create a project from a template, add an existing folder, pin, rename
+  or open any project in one click. The ⌂ button in the editor brings you back.
 - **Works with other tools**: files changed on disk (by Claude Code in a terminal, `git
   checkout`, another editor) reload automatically. A save never silently overwrites a newer
   version on disk.
@@ -59,15 +62,52 @@ Options:
 
 Without `--exit-when-idle`, stop the server with Ctrl-C.
 
+## Home page
+
+The Home page manages all your projects:
+
+```sh
+bin/prism-home                            # opens http://127.0.0.1:8790/
+```
+
+- **Project cards** show the first PDF page, the `\title`, the folder, when a source file last
+  changed, the git branch and number of changed files, and a green **Open** badge while an
+  editor runs for the project. Search with `/`, sort by recently opened, recently edited or name.
+- **Open** starts prism-local for the project in the background (through the launcher, so it
+  gets its stable port and stops after its last page closes) and opens the editor in a tab.
+  A second click brings that tab back instead of opening another.
+- **+ New project** (or `n`) creates a folder from a template (math paper with amsart and
+  theorem environments, plain article, or empty), with `prism.json` and optionally a git
+  repository, and opens it.
+- **Add folder…** adds an existing LaTeX folder. **Browse…** opens a native folder dialog (tkinter).
+- The **⋯** menu pins a project to the top, renames it in the list, shows it in Explorer/Finder,
+  copies its path, or removes it from the list. Removing never touches the files.
+- Every project you open with prism-local, by any route, is added to the list automatically.
+- The ⌂ button in the editor opens the Home page, starting it if needed.
+
+The list is stored in `projects.json` in the state directory (`%LOCALAPPDATA%\prism-local` on
+Windows, `~/.local/state/prism-local` elsewhere, or `$PRISM_STATE_DIR`).
+
 ## One-click launcher (Windows)
 
-`launcher/` turns a project into a Start menu and desktop shortcut:
+`launcher/` creates a **Prism** shortcut in the Start menu and on the desktop:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File launcher\make-shortcut.ps1
+```
+
+Clicking it opens the Home page in a Chrome or Edge window of its own. From there you manage
+your projects, and each project you open becomes a tab of that window with its editor. The
+Home page stops about 10 seconds after you close it; open editors keep running until they
+are closed too.
+
+To skip the Home page for one project, make a shortcut that opens its editor directly:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File launcher\make-shortcut.ps1 -Project D:\path\to\paper
 ```
 
-This creates **Prism · paper**. Clicking it:
+This creates **Prism · paper**. Clicking a project shortcut:
 
 1. Opens another page if prism-local already runs for that project.
 2. Otherwise starts prism-local in the background, with no console window, and opens the
@@ -106,6 +146,7 @@ The launcher can also be run directly, on any platform:
 
 ```sh
 python launcher/prism_launcher.pyw /path/to/paper [--browser window|app|default|none] [--port N]
+python launcher/prism_launcher.pyw --home         # the Home page
 ```
 
 `launcher/make_icon.py` redraws `launcher/prism.ico`.
@@ -220,11 +261,14 @@ prism-local is meant for a single user on their own machine.
 
 ```
 bin/prism-local            command-line launcher
+bin/prism-home             command-line launcher for the Home page
 launcher/                  one-click launcher: prism_launcher.pyw, make-shortcut.ps1, icon
 prism_local/server.py      HTTP server: files, builds, log parsing, SyncTeX, idle exit
+prism_local/hub.py         Home page server: project list, templates, starting editors
+prism_local/registry.py    shared state: project list, running instances, ports
 prism_local/presence.py    which pages are open, for --exit-when-idle
 prism_local/agent.py       Claude Code runner, per-turn diffs and undo, usage limits
-prism_local/static/        front end (app.js, pdfview.js, viewer.*, common.js, app.css)
+prism_local/static/        front end (app.js, pdfview.js, viewer.*, home.*, common.js, app.css)
 prism_local/static/vendor/ CodeMirror 5.65.18 (MIT), PDF.js 3.11.174 (Apache-2.0)
 examples/minimal/          a small amsart project to try it on
 tests/                     python -m unittest discover -s tests
@@ -236,8 +280,8 @@ tests/                     python -m unittest discover -s tests
   line for ordinary text and math. Inside complex constructs (tables, TikZ, floats) it can land a few lines off.
 - The Tectonic build path is the one tested most. The latexmk defaults use standard flags
   (`-pdf -synctex=1 -file-line-error`).
-- No collaborative editing, and no file creation, rename or delete from the UI. Use your file
-  manager, git or Claude for those.
+- No collaborative editing, and no file creation, rename or delete inside the editor. Use your
+  file manager, git or Claude for those. (The Home page can create new projects.)
 
 ## License
 
