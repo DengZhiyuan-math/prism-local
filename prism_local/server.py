@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """prism-local: a local web studio for LaTeX projects.
 
-Editor + PDF preview with SyncTeX + a Claude Code agent panel, served from
+Editor + PDF preview with SyncTeX + an AI agent panel, served from
 127.0.0.1 with the Python standard library only.
 
     python3 prism_local/server.py [PROJECT_DIR] [--port 8765] [--no-browser]
                                   [--exit-when-idle] [--port-tries N] [--ready-file F]
 
 Besides the configured build commands it runs only read-only `git status` /
-`git diff` and, for the Claude panel, the local Claude Code CLI (agent.py).
+`git diff` and, for the agent panel, the chosen AI backend (agent.py, backends.py):
+the Claude Code or Codex CLI, or calls to an OpenAI-compatible API such as DeepSeek.
 Optional per-project settings live in PROJECT_DIR/prism.json (see README).
 """
 from __future__ import annotations
@@ -31,7 +32,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent import NO_WINDOW, AgentManager, claude_bin  # noqa: E402
+from agent import NO_WINDOW, AgentManager  # noqa: E402
 from presence import Presence, serve_stream, valid_id  # noqa: E402
 import registry  # noqa: E402
 
@@ -40,13 +41,8 @@ EDITABLE_SUFFIXES = {".tex", ".bib", ".md", ".sty", ".cls", ".bbx", ".cbx", ".tx
 SKIP_DIRS = {"node_modules", "__pycache__", "venv", ".venv"}
 MAX_FILES = 3000
 BUILD_LOCK = threading.Lock()
+SAVE_LOCK = threading.Lock()
 
-DEFAULT_LABEL_PREFIXES = {
-    "theorem": "thm", "proposition": "prop", "lemma": "lem", "corollary": "cor",
-    "conjecture": "conj", "definition": "def", "assumption": "ass", "example": "ex",
-    "remark": "rem", "equation": "eq", "align": "eq", "figure": "fig", "table": "tab",
-    "section": "sec",
-}
 STANDARD_THEOREMS = ["theorem", "proposition", "lemma", "corollary", "definition",
                      "remark", "example"]
 
@@ -64,8 +60,6 @@ class Config:
         self.outdir = data.get("outdir", "build").strip("/") or "build"
         self.files = data.get("files")                 # optional list of globs
         self.exclude = data.get("exclude", [])
-        self.label_prefixes = {**DEFAULT_LABEL_PREFIXES, **data.get("labelPrefixes", {})}
-        self.snippets = data.get("snippets", [])
         self.build = self._build_cmds(data.get("build") or {})
         stem = Path(self.main).stem
         out = self.root / self.outdir
@@ -359,6 +353,30 @@ def parse_log_warnings() -> list[dict]:
     return diags
 
 
+def git_perl_dir() -> str | None:
+    """Where Git for Windows keeps its perl.exe, if it is installed.
+
+    latexmk is a Perl script. MiKTeX does not ship Perl, and on Windows Perl is rarely on
+    PATH, yet Git for Windows brings one along. Builds use it when no other Perl is found.
+    """
+    if os.name != "nt" or shutil.which("perl"):
+        return None
+    cands = []
+    git = shutil.which("git")
+    if git:                                   # <Git>/cmd/git.exe -> <Git>/usr/bin
+        cands.append(Path(git).resolve().parent.parent / "usr" / "bin")
+    for var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        if os.environ.get(var):
+            cands.append(Path(os.environ[var]) / "Git" / "usr" / "bin")
+    if os.environ.get("LOCALAPPDATA"):
+        cands.append(Path(os.environ["LOCALAPPDATA"]) / "Programs" / "Git" / "usr" / "bin")
+    return next((str(d) for d in cands if (d / "perl.exe").is_file()), None)
+
+
+def uses_latexmk(argv: list[str]) -> bool:
+    return any(Path(a).stem.lower() == "latexmk" for a in argv[:3])
+
+
 def run_build(mode: str) -> dict:
     argv = CFG.build.get(mode)
     if not argv:
@@ -373,10 +391,19 @@ def run_build(mode: str) -> dict:
         # bibtex runs inside outdir under latexmk; let it find .bib files in the project root.
         env = {**os.environ,
                "BIBINPUTS": os.pathsep.join([str(ROOT), os.environ.get("BIBINPUTS", "")])}
+        note = ""
+        if uses_latexmk(argv) and os.name == "nt" and not shutil.which("perl"):
+            perl = git_perl_dir()
+            if perl:      # appended, so Git's other tools never shadow anything on PATH
+                env["PATH"] = env.get("PATH", "") + os.pathsep + perl
+            else:
+                note = ("prism-local: latexmk needs Perl, and none was found. Install Strawberry "
+                        "Perl (https://strawberryperl.com) or Git for Windows, or install "
+                        "Tectonic, which needs no Perl.\n\n")
         proc = subprocess.run(CFG.expand(argv), cwd=ROOT, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=900, env=env,
                               **NO_WINDOW)
-        out = proc.stdout + proc.stderr
+        out = note + proc.stdout + proc.stderr
         diags = parse_stdout(out)
         known = {(d["message"]) for d in diags}
         diags += [d for d in parse_log_warnings() if d["message"] not in known]
@@ -498,7 +525,7 @@ class SyncTex:
 
 SYNC = SyncTex()
 SYNC_LOCK = threading.Lock()
-AGENT = AgentManager(lambda: ROOT, lambda: list_files())
+AGENT = AgentManager(lambda: ROOT, lambda: list_files(), resolve)
 PRESENCE = Presence()
 
 
@@ -571,17 +598,18 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/config":
                 return self._json({"main": CFG.main, "outdir": CFG.outdir,
                                    "modes": [m for m in ("draft", "strict", "check") if m in CFG.build],
-                                   "build": {k: CFG.expand(v) for k, v in CFG.build.items()},
-                                   "labelPrefixes": CFG.label_prefixes, "snippets": CFG.snippets})
+                                   "build": {k: CFG.expand(v) for k, v in CFG.build.items()}})
             if u.path == "/api/agent/events":
                 job = AGENT.jobs.get(int(q["job"]))
                 if not job:
                     return self._err(404, "unknown job")
                 evs, done = job.wait_events(int(q.get("after", 0)), 20.0)
                 return self._json({"events": evs, "done": done})
+            if u.path == "/api/agent/commands":
+                r = AGENT.commands(q.get("provider") or None, refresh=q.get("refresh") == "1")
+                return self._json(r, 502 if "error" in r else 200)
             if u.path == "/api/agent/info":
-                exe = claude_bin()
-                return self._json({"available": bool(exe), "bin": exe, "rate": AGENT.rate})
+                return self._json(AGENT.info())
             if u.path == "/api/symbols":
                 return self._json(symbols())
             if u.path == "/api/file":
@@ -653,22 +681,33 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/file":
                 p = resolve(body["path"])
                 base = body.get("base_mtime")
-                if p.exists() and base is not None and abs(mtime(p) - base) > 1e-6 \
-                        and not body.get("force"):
-                    return self._json({"conflict": True, "mtime": mtime(p)}, 409)
-                tmp = p.with_name(p.name + ".prism-tmp")
-                tmp.write_text(body["content"], encoding="utf-8")
-                os.replace(tmp, p)
-                return self._json({"ok": True, "mtime": mtime(p)})
+                with SAVE_LOCK:     # check-then-write must not interleave with another save
+                    if p.exists() and base is not None and abs(mtime(p) - base) > 1e-6 \
+                            and not body.get("force"):
+                        return self._json({"conflict": True, "mtime": mtime(p)}, 409)
+                    tmp = p.with_name(f"{p.name}.{threading.get_ident()}.prism-tmp")
+                    try:
+                        tmp.write_text(body["content"], encoding="utf-8")
+                        os.replace(tmp, p)
+                    finally:
+                        tmp.unlink(missing_ok=True)
+                    return self._json({"ok": True, "mtime": mtime(p)})
             if u.path == "/api/agent":
+                scope = body.get("scope") or None
+                if scope is not None:
+                    if not isinstance(scope, list) or not all(isinstance(f, str) for f in scope):
+                        raise ValueError("scope must be a list of files")
+                    for f in scope:
+                        resolve(f)          # an editable project file, or ValueError
                 r = AGENT.start(body["prompt"], body.get("session_id") or None,
-                                body.get("mode", "ask"), body.get("model") or None)
+                                body.get("mode", "ask"), body.get("model") or None,
+                                body.get("effort") or None, scope, body.get("provider") or None)
                 return self._json(r, 409 if "error" in r else 200)
             if u.path == "/api/home":
                 r = registry.ensure_server(None)
                 return self._json(r, 502 if "error" in r else 200)
             if u.path == "/api/agent/usage":
-                return self._json(AGENT.probe_rate())
+                return self._json(AGENT.probe_rate(body.get("provider") or None))
             if u.path == "/api/agent/stop":
                 return self._json(AGENT.stop(int(body["job"])))
             if u.path == "/api/agent/undo":
@@ -679,6 +718,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, "not found")
         except (ValueError, KeyError) as e:
             return self._err(400, str(e))
+        except OSError as e:                 # e.g. the file is locked by another program
+            return self._err(500, f"{type(e).__name__}: {e}")
 
 
 class Server(ThreadingHTTPServer):

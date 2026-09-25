@@ -60,7 +60,7 @@ CodeMirror.commands.toggleTexComment = (ed) => {
   });
 };
 cm.getWrapperElement().style.display = "none";
-cm.on("change", () => { const t = activeTab(); if (t) renderTabs(); });
+cm.on("change", () => { const t = activeTab(); if (t) { renderTabs(); scheduleSave(t); } });
 cm.on("inputRead", (ed, ch) => { if (/[{,]/.test(ch.text.join("")) || /\\[A-Za-z]*$/.test(lineBefore(ed))) showCompletions(ed, false); });
 
 function modeFor(path) { return path.endsWith(".md") ? "markdown" : "stex"; }
@@ -82,7 +82,7 @@ async function openFile(path, line) {
   $("#empty-editor").hidden = true;
   applyDiagnostics();
   renderTabs(); renderTree(); showBanner(t);
-  persistSession(); if (typeof updateCtxLabel === "function") updateCtxLabel();
+  persistSession();
   if (line) jumpToLine(line);
   cm.focus();
   cm.refresh();
@@ -97,8 +97,9 @@ function jumpToLine(line) {
   setTimeout(() => cm.removeLineClass(h, "background", "cm-line-flash"), 1400);
 }
 
-function closeTab(path) {
+async function closeTab(path) {
   const t = S.tabs.find((x) => x.path === path);
+  if (t && isDirty(t) && !t.conflict) await saveTab(t);      // autosave may still be pending
   if (t && isDirty(t) && !confirm(`${path} has unsaved changes. Close anyway?`)) return;
   S.tabs = S.tabs.filter((x) => x.path !== path);
   if (S.active === path) {
@@ -124,7 +125,14 @@ $("#tabs").addEventListener("auxclick", (e) => { const t = e.target.closest(".ta
 function persistSession() { store.set("session", { tabs: S.tabs.map((t) => t.path), active: S.active }); }
 
 /* ------------------------------------------------------------------ save & external changes */
-async function saveTab(t, force = false) {
+// One save per tab at a time: a second save waits for the first, so two writes never
+// race on the server (the second would otherwise look like a change made on disk).
+function saveTab(t, force = false) {
+  const run = () => saveTabNow(t, force);
+  t.saving = (t.saving || Promise.resolve()).then(run, run);
+  return t.saving;
+}
+async function saveTabNow(t, force) {
   if (!isDirty(t) && !force) return true;
   const gen = t.doc.changeGeneration();
   const r = await api("/api/file", { path: t.path, content: t.doc.getValue(), base_mtime: t.mtime, force });
@@ -140,8 +148,38 @@ async function saveTab(t, force = false) {
 }
 async function saveActive() {
   const t = activeTab(); if (!t) return;
+  clearTimeout(t.saveTimer);
   const ok = await saveTab(t);
   if (ok && $("#auto-compile").checked) compile();
+}
+
+/* Autosave, as in Overleaf: an edit is saved a moment after you stop typing, and every
+   open file is saved when you switch away. A file that changed on disk meanwhile is not
+   overwritten: the save stops with the conflict banner, and autosave waits until the
+   banner is resolved. */
+const AUTOSAVE_MS = 800, AUTOCOMPILE_MS = 1500;
+function scheduleSave(t) {
+  clearTimeout(t.saveTimer);
+  t.saveTimer = setTimeout(() => autosave(t), AUTOSAVE_MS);
+}
+async function autosave(t) {
+  if (!S.tabs.includes(t) || t.conflict || !isDirty(t)) return;
+  if ((await saveTab(t)) && $("#auto-compile").checked) scheduleCompile();
+}
+function flushSaves() {
+  for (const t of S.tabs) { clearTimeout(t.saveTimer); autosave(t); }
+}
+window.addEventListener("blur", flushSaves);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushSaves(); });
+
+// Auto-compile: shortly after the last edit is saved; if a build is running, once it ends.
+let compileTimer = null;
+function scheduleCompile() {
+  clearTimeout(compileTimer);
+  compileTimer = setTimeout(function go() {
+    if (S.building) { compileTimer = setTimeout(go, 1000); return; }
+    compile();
+  }, AUTOCOMPILE_MS);
 }
 async function saveAll() {
   let ok = true;
@@ -217,7 +255,7 @@ $("#outline").addEventListener("click", (e) => { const li = e.target.closest("li
 $("#btn-refresh-outline").onclick = () => loadSymbols();
 async function loadSymbols() {
   const r = await api("/api/symbols");
-  if (r._status === 200) { S.symbols = r; renderOutline(); buildInsertMenu(); }
+  if (r._status === 200) { S.symbols = r; renderOutline(); }
 }
 
 async function poll() {
@@ -282,59 +320,22 @@ function showCompletions(ed, explicit) {
   ed.showHint({ hint: (e) => computeHints(e, explicit), completeSingle: false });
 }
 
-/* ------------------------------------------------------------------ snippets */
-// Insert menu: theorem-like environments found via \newtheorem, standard math
-// environments, and project snippets from prism.json. Filled by loadConfig().
-let LABEL_PREFIX = {};
-let SNIPPETS = [];
-function buildInsertMenu() {
-  const envs = S.symbols.environments || [];
-  const opt = (v, l) => `<option value="${esc(v)}">${esc(l || v)}</option>`;
-  let h = `<option value="">Insert…</option>`;
-  if (envs.length) h += `<optgroup label="Theorem-like">${envs.map((e) => opt("env:" + e, e)).join("")}</optgroup>`;
-  h += `<optgroup label="Math & text">${["proof", "equation", "align", "itemize", "enumerate", "figure"].map((e) => opt("env:" + e, e)).join("")}</optgroup>`;
-  if (SNIPPETS.length) h += `<optgroup label="Project snippets">${SNIPPETS.map((s, i) => opt("snip:" + i, s.name)).join("")}</optgroup>`;
-  $("#insert").innerHTML = h;
-}
 async function loadConfig() {
   const r = await api("/api/config");
   if (r._status !== 200) return;
-  LABEL_PREFIX = r.labelPrefixes || {}; SNIPPETS = r.snippets || [];
-  const sel = $("#build-mode");
-  const labels = { draft: "Draft (continue on errors)", strict: "Strict (stop at first error)", check: "Check" };
-  sel.innerHTML = (r.modes || []).map((m) => `<option value="${m}" title="${esc((r.build[m] || []).join(" "))}">${labels[m] || m}</option>`).join("")
-    || `<option value="">no build command</option>`;
+  BUILD.modes = r.modes || [];
+  BUILD.cmds = r.build || {};
   const want = store.get("buildmode", "draft");
-  sel.value = (r.modes || []).includes(want) ? want : (r.modes || [])[0] || "";
-  buildInsertMenu();
+  BUILD.mode = BUILD.modes.includes(want) ? want : BUILD.modes[0] || "";
+  renderCompileMenu();
 }
-$("#insert").onchange = (e) => {
-  const val = e.target.value; e.target.value = "";
-  if (!val || !activeTab()) return;
-  const cur = cm.getCursor(), ind = cm.getLine(cur.line).match(/^\s*/)[0];
-  let text, caret;
-  if (val.startsWith("snip:")) {
-    const s = SNIPPETS[+val.slice(5)];
-    text = s.text; caret = Number.isInteger(s.caret) ? s.caret : text.length;
-  } else {
-    const env = val.slice(4);
-    const p = LABEL_PREFIX[env];
-    const head = `\\begin{${env}}` + (p ? `\\label{${p}:}` : "");
-    text = `${head}\n${ind}  \n${ind}\\end{${env}}`;
-    caret = p ? head.length - 1 : null;
-  }
-  cm.replaceSelection(text);
-  if (caret !== null) cm.setCursor({ line: cur.line, ch: cur.ch + caret });
-  else cm.setCursor({ line: cur.line + 1, ch: ind.length + 2 });
-  cm.focus();
-};
-$("#btn-save").onclick = () => saveActive();
+
 
 /* ------------------------------------------------------------------ build */
 async function compile() {
   if (S.building) return;
   if (!(await saveAll())) return;
-  const mode = $("#build-mode").value;
+  const mode = BUILD.mode;
   S.building = true;
   const st = $("#build-status");
   st.className = "status busy"; st.textContent = `compiling (${mode})…`;
@@ -361,10 +362,38 @@ async function compile() {
   }
 }
 $("#btn-compile").onclick = () => compile();
+
+/* Compile menu: build mode and auto-compile, on the ▾ half of the Compile button. */
+const BUILD = { modes: [], cmds: {}, mode: store.get("buildmode", "draft") };
+const MODE_INFO = {
+  draft: ["Draft", "continue on errors"], strict: ["Strict", "stop at first error"], check: ["Check", ""],
+};
+function renderCompileMenu() {
+  $("#build-modes").innerHTML = BUILD.modes.map((m) => {
+    const [name, note] = MODE_INFO[m] || [m, ""];
+    return `<label class="dd-item" title="${esc((BUILD.cmds[m] || []).join(" "))}"><input type="radio" name="build-mode" value="${m}" ${m === BUILD.mode ? "checked" : ""}> ${esc(name)}${note ? `<small>${esc(note)}</small>` : ""}</label>`;
+  }).join("") || `<div class="dd-item"><small>No build command (see README)</small></div>`;
+  updateCompileLabel();
+}
+function updateCompileLabel() {
+  const name = (MODE_INFO[BUILD.mode] || [BUILD.mode || "—"])[0];
+  $("#compile-mode-label").innerHTML = esc(name) + ($("#auto-compile").checked ? '<span class="auto-tag">AUTO</span>' : "");
+  $("#btn-compile").title = `Save all and compile (${name}) (⌘↵)`;
+}
+function compileMenu(open) {
+  $("#compile-menu").hidden = !open;
+  $("#btn-compile-menu").setAttribute("aria-expanded", String(open));
+}
+$("#btn-compile-menu").onclick = (e) => { e.stopPropagation(); compileMenu($("#compile-menu").hidden); };
+$("#compile-menu").addEventListener("click", (e) => e.stopPropagation());
+$("#build-modes").addEventListener("change", (e) => {
+  BUILD.mode = e.target.value; store.set("buildmode", BUILD.mode); updateCompileLabel(); compileMenu(false);
+});
+document.addEventListener("click", () => compileMenu(false));
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") compileMenu(false); });
 $("#auto-compile").checked = store.get("autocompile", false);
-$("#auto-compile").onchange = (e) => store.set("autocompile", e.target.checked);
-$("#build-mode").value = store.get("buildmode", "draft");
-$("#build-mode").onchange = (e) => store.set("buildmode", e.target.value);
+$("#auto-compile").onchange = (e) => { store.set("autocompile", e.target.checked); updateCompileLabel(); };
+updateCompileLabel();
 
 function renderProblems() {
   const d = S.diagnostics;
@@ -416,7 +445,6 @@ async function showDiff(path) {
   }).join("\n");
   openPanel("diff");
 }
-$("#btn-diff").onclick = () => showDiff();
 
 /* ------------------------------------------------------------------ PDF */
 PV.init({ scaleKey: "scale" });
@@ -428,8 +456,8 @@ function setPopped(on) {
   if (POP.alive === on) return;
   POP.alive = on;
   $("#pdf-pane").hidden = on; document.querySelector('.gutter[data-resize="pdf"]').hidden = on;
-  $("#btn-popout").classList.toggle("active", on);
-  $("#btn-popout").title = on ? "PDF is open in another tab — click to focus it" : "Open the PDF in a separate tab (stays in sync)";
+  // The Compile button lives on the PDF toolbar; while that is hidden, show it in the top bar.
+  if (on) $("#build-status").before($("#compile-box")); else $("#pdf-toolbar").prepend($("#compile-box"));
   cm.refresh();
   if (!on && S.pdfMtime && S.pdfMtime !== PV.mtime) PV.load(S.pdfMtime);
 }
@@ -438,15 +466,38 @@ function popOut() {
   popWin = window.open("/viewer", "prism-pdf");
   if (popWin) popWin.focus();
 }
-$("#btn-popout").onclick = popOut;
 $("#pdf-popout").onclick = (e) => { e.preventDefault(); popOut(); };
+
+// Is a viewer tab open? Each viewer holds the Web Lock VIEWER_LOCK for as long as it
+// lives, and the browser releases it the moment the tab closes or crashes. Waiting for
+// that lock tells us when the last viewer is gone, however much the browser throttles a
+// hidden viewer's timers. (Its heartbeat can arrive a minute late, which used to make the
+// inline PDF flash back in; the heartbeat now only serves browsers without Web Locks.)
+const VIEWER_LOCK = "prism-pdf-viewer";
+const LOCKS = navigator.locks && navigator.locks.request ? navigator.locks : null;
+let watchingViewer = false;
+function watchViewer() {
+  if (!LOCKS || watchingViewer) return;
+  watchingViewer = true;
+  // Granted only when no viewer holds the lock; release it again at once.
+  LOCKS.request(VIEWER_LOCK, async () => {
+    const another = (await LOCKS.query()).pending.some((l) => l.name === VIEWER_LOCK);
+    if (!another) setPopped(false);
+    return another;
+  }).then((another) => { watchingViewer = false; if (another) setTimeout(watchViewer, 0); });
+}
 if (pdfChannel) pdfChannel.onmessage = (ev) => {
   const m = ev.data || {};
-  if (m.type === "alive") { POP.last = Date.now(); setPopped(true); }
-  else if (m.type === "bye") setPopped(false);
+  if (m.type === "alive") { POP.last = Date.now(); setPopped(true); watchViewer(); }
+  else if (m.type === "bye") { if (!LOCKS) setPopped(false); }     // the lock watcher notices
   else if (m.type === "inverse") inverseJump(m.page, m.x, m.y);
 };
-setInterval(() => { if (POP.alive && Date.now() - POP.last > 5000) setPopped(false); }, 2000);
+if (LOCKS) {
+  // A viewer that was already open when this editor (re)loaded.
+  LOCKS.query().then((s) => { if (s.held.some((l) => l.name === VIEWER_LOCK)) { setPopped(true); watchViewer(); } });
+} else {
+  setInterval(() => { if (POP.alive && Date.now() - POP.last > 90000) setPopped(false); }, 5000);
+}
 
 function showPdf(mtime) {
   S.pdfMtime = mtime;
@@ -510,6 +561,7 @@ document.querySelectorAll(".gutter").forEach((g) => {
 for (const [k, sel] of [["sidebar", "#sidebar"], ["pdf", "#pdf-pane"], ["chat", "#chat"]]) { const w = store.get("w." + k, null); if (w) $(sel).style.width = w; }
 
 document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented) return;          // CodeMirror already handled it (its own ⌘S, ⌘↵)
   const mod = e.metaKey || e.ctrlKey;
   if (mod && e.key === "s") { e.preventDefault(); saveActive(); }
   else if (mod && e.key === "Enter") { e.preventDefault(); compile(); }
@@ -517,8 +569,21 @@ document.addEventListener("keydown", (e) => {
 });
 window.addEventListener("beforeunload", (e) => { if (S.tabs.some(isDirty)) { e.preventDefault(); e.returnValue = ""; } });
 
-/* ------------------------------------------------------------------ Claude panel */
-const C = { session: store.get("chat.session", null), job: null, cur: null };
+/* ------------------------------------------------------------------ agent panel */
+// The agent runs on one provider at a time (Claude Code, Codex CLI, DeepSeek or another
+// OpenAI-compatible API; see backends.py). Conversation, model and effort are kept per
+// provider. P holds what /api/agent/info reports about each provider.
+const P = { list: [], byId: {} };
+const C = { provider: store.get("chat.provider", null), job: null, cur: null };
+const prov = () => P.byId[C.provider] || { id: C.provider, label: "Agent", models: [], efforts: [] };
+const provLabel = () => prov().label || "the agent";
+// Settings saved before providers existed belong to Claude Code.
+const provGet = (k) => store.get(`chat.${k}.${C.provider}`, C.provider === "claude" ? store.get(`chat.${k}`, null) : null);
+const provSet = (k, v) => store.set(`chat.${k}.${C.provider}`, v);
+function loadProvider() {
+  C.session = provGet("session"); C.model = provGet("model"); C.effort = provGet("effort");
+}
+loadProvider();
 
 function chatHidden(h) {
   $("#chat").classList.toggle("hidden", h); $("#chat-gutter").classList.toggle("hidden", h);
@@ -555,45 +620,119 @@ function chatAppend(html, cls) {
 }
 function saveChatLog() { store.set("chat.log", $("#chat-log").innerHTML.slice(-400000)); }
 function chatIntro() {
-  chatAppend(`Claude Code runs in this repository with the project's CLAUDE.md rules.
+  chatAppend(`The agent works in this repository and follows the project's CLAUDE.md / AGENTS.md.
+Pick who runs it in the menu above: Claude Code, Codex CLI, or an API model such as DeepSeek.
 <b>Edit</b> mode may change files — every turn ends with a diff and an Undo button.
-<b>Ask</b> mode is read-only. Select text and press <code>⌘L</code> to ask about it.
+<b>Ask</b> mode is read-only. Type <code>@</code> to point the agent at a file or the selection
+(or select text and press <code>⌘L</code>): it may then change only those files.
+Without <code>@</code>, it may change any file in the project. Type <code>/</code> for commands.
 Commits, pushes and non-allowlisted shell commands are not permitted from here.`, "msg intro");
 }
 
-function currentContext() {
-  const t = activeTab();
-  if (!t) return null;
-  const ctx = { file: t.path, line: cm.getCursor().line + 1 };
-  const sel = cm.getSelection();
-  if (sel) { ctx.selection = sel.slice(0, 6000); ctx.from = cm.getCursor("from").line + 1; ctx.to = cm.getCursor("to").line + 1; }
-  return ctx;
-}
-function editorContext() { return $("#chat-ctx").checked ? currentContext() : null; }
-function describeCtx(ctx) {
-  if (!ctx) return "no editor context";
-  return ctx.selection ? `${ctx.file}:${ctx.from}–${ctx.to} (selection)` : `${ctx.file}, line ${ctx.line}`;
-}
-function updateCtxLabel() { $("#chat-ctx-text").textContent = "Attach: " + describeCtx(currentContext()); }
-cm.on("cursorActivity", updateCtxLabel);
+/* Mentions. "@path" points the agent at a file, "@path:12-18" at those lines (made from the
+   editor selection). With mentions, the agent may change only the mentioned files: the
+   server enforces that (Claude Code permission rules, the API tools' checks, or undoing
+   Codex's writes outside them after the turn). Without any, it may change any
+   file in the project and create new ones. */
+const MENTION_RE = /(^|\s)@([^\s@]+)/g;
+C.snips = store.get("chat.snips", {});      // "@file:a-b" -> the text selected when it was made
 
-function buildPrompt(text, ctx) {
-  if (!ctx) return text;
-  let block = `[Editor context]\nFile: ${ctx.file}\nCursor: line ${ctx.line}\n`;
-  if (ctx.selection) block += `Selection (lines ${ctx.from}–${ctx.to}):\n\`\`\`latex\n${ctx.selection}\n\`\`\`\n`;
-  return block + "[/Editor context]\n\n" + text;
+function selectionMention() {
+  const t = activeTab(), sel = cm.getSelection();
+  if (!t || !sel) return null;
+  const from = cm.getCursor("from").line + 1, to = cm.getCursor("to").line + 1;
+  return { token: `@${t.path}:${from === to ? from : from + "-" + to}`, file: t.path, text: sel.slice(0, 6000) };
+}
+function parseMentions(text) {
+  const out = [], seen = new Set();
+  for (const m of text.matchAll(MENTION_RE)) {
+    const raw = m[2].replace(/[.,;!?)]+$/, "");
+    const mm = /^(.+?)(?::(\d+)(?:-(\d+))?)?$/.exec(raw);
+    if (!mm || seen.has(raw) || !S.files.some((f) => f.path === mm[1])) continue;
+    seen.add(raw);
+    const from = mm[2] ? +mm[2] : null;
+    out.push({ token: "@" + raw, file: mm[1], from, to: mm[3] ? +mm[3] : from });
+  }
+  return out;
+}
+const rangeLabel = (m) => m.from ? `${m.file}:${m.from}${m.to !== m.from ? "–" + m.to : ""}` : m.file;
+
+async function referenceBlock(mentions) {
+  if (!mentions.length) return "";
+  let b = "[Referenced]\n";
+  for (const m of mentions) {
+    if (!m.from) { b += `File: ${m.file}\n`; continue; }
+    let txt = C.snips[m.token];
+    if (txt === undefined) {
+      const r = await api("/api/file?path=" + encodeURIComponent(m.file));
+      txt = (r.content || "").split("\n").slice(m.from - 1, m.to).join("\n");
+    }
+    b += `File: ${m.file}, lines ${m.from}–${m.to} (change only these lines unless the request needs more):\n\`\`\`latex\n${txt}\n\`\`\`\n`;
+  }
+  return b + "[/Referenced]";
+}
+function describeScope(mentions, mode) {
+  if (mode === "ask") return "Ask mode: read-only";
+  if (!mentions.length) return "Scope: whole workspace (any file, new files allowed)";
+  return "Scope: only " + mentions.map(rangeLabel).join(", ");
+}
+function updateScope() {
+  const ms = parseMentions($("#chat-input").value), mode = $("#chat-mode").value;
+  const el = $("#chat-scope");
+  el.textContent = describeScope(ms, mode);
+  el.className = mode === "ask" ? "ask" : ms.length ? "narrow" : "wide";
+  el.title = "Type @ to point the agent at a file or at the editor selection. "
+    + "With @-mentions it may change only those files; without, any file in the project.";
+}
+function mentionHtml(text) {
+  return esc(text).replace(/(^|\s)(@[^\s@]+)/g, '$1<span class="mention">$2</span>');
+}
+$("#chat-input").addEventListener("input", updateScope);
+$("#chat-mode").addEventListener("change", updateScope);
+
+// Insert a mention at the caret (⌘L, or picking one from the @ menu).
+function insertMention(token, snip, replaceFrom) {
+  const inp = $("#chat-input"), v = inp.value, caret = inp.selectionStart ?? v.length;
+  const start = replaceFrom ?? caret;
+  const before = v.slice(0, start), after = v.slice(caret);
+  const pad = before && !/\s$/.test(before) ? " " : "";
+  inp.value = before + pad + token + " " + after.replace(/^\s+/, "");
+  const pos = (before + pad + token + " ").length;
+  inp.setSelectionRange(pos, pos);
+  if (snip !== undefined) {
+    delete C.snips[token]; C.snips[token] = snip;             // newest last; keep the latest 50
+    C.snips = Object.fromEntries(Object.entries(C.snips).slice(-50));
+    store.set("chat.snips", C.snips);
+  }
+  updateScope(); inp.focus();
 }
 
 async function chatSend() {
   if (C.job) return;
   const text = $("#chat-input").value.trim();
   if (!text) return;
-  if (!(await saveAll())) return toast("Resolve the save conflict before asking Claude.");
-  const ctx = editorContext(), mode = $("#chat-mode").value;
-  const r = await api("/api/agent", { prompt: buildPrompt(text, ctx), session_id: C.session, mode });
+  $("#slash-menu").hidden = true;
+  const slash = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/.exec(text);
+  if (slash && LOCAL[slash[1]]) {          // handled here, without running the agent
+    $("#chat-input").value = "";
+    chatAppend(esc(text), "msg user");
+    return runLocal(slash[1], (slash[2] || "").trim());
+  }
+  if (!(await saveAll())) return toast("Resolve the save conflict before asking the agent.");
+  const mode = $("#chat-mode").value;
+  const mentions = parseMentions(text);
+  const refs = await referenceBlock(mentions);
+  let prompt;
+  if (slash) { await loadCatalog(); prompt = slashPrompt(text, refs); }
+  else prompt = refs ? refs + "\n\n" + text : text;
+  // Only the mentioned files may change; without mentions, the whole project.
+  const scope = mode === "edit" && mentions.length ? [...new Set(mentions.map((m) => m.file))] : null;
+  const provider = C.provider;
+  const r = await api("/api/agent", { prompt, session_id: C.session, mode, model: C.model, effort: C.effort, scope, provider });
   if (r.error) return chatAppend(`<div class="err">${esc(r.error)}</div>`, "card");
-  $("#chat-input").value = "";
-  chatAppend(`${esc(text)}<span class="ctx">${esc(describeCtx(ctx))} · ${mode === "edit" ? "Edit" : "Ask"}</span>`, "msg user");
+  $("#chat-input").value = ""; updateScope();
+  const extra = [provLabel(), C.model, C.effort && "effort " + C.effort].filter(Boolean).join(" · ");
+  chatAppend(`${mentionHtml(text)}<span class="ctx">${esc(describeScope(mentions, mode))}${extra ? " · " + esc(extra) : ""}</span>`, "msg user");
   C.job = r.job; C.cur = null;
   const tools = new Map();
   $("#chat-send").textContent = "Stop"; $("#chat-send").classList.remove("primary");
@@ -606,7 +745,11 @@ async function chatSend() {
     catch { await new Promise((res) => setTimeout(res, 1000)); continue; }
     if (d._status !== 200) break;
     for (const e of d.events) {
-      if (e.t === "init") { C.session = e.session_id; store.set("chat.session", C.session); }
+      if (e.t === "init") {
+        // The session belongs to the provider that ran the turn, even if the menu changed since.
+        store.set(`chat.session.${provider}`, e.session_id);
+        if (C.provider === provider) C.session = e.session_id;
+      }
       else if (e.t === "message_start") { C.cur = null; buf = ""; streamed = false; }
       else if (e.t === "delta") {
         if (!C.cur) { C.cur = chatAppend("", "msg assistant"); buf = ""; }
@@ -633,11 +776,18 @@ async function chatSend() {
 }
 
 // Usage limits as reported by Claude Code's rate_limit_event (utilization 0–1 per window).
+let lastRate = null;
 function renderQuota(rate) {
   const q = $("#quota");
+  lastRate = rate;
+  const hidden = store.get("chat.quotaHidden", false);
+  q.classList.toggle("collapsed", hidden);
   const refresh = `<button class="tiny" id="quota-refresh" title="Check usage now (a tiny Haiku call, ≈ $0.001)">↻</button>`;
+  const hide = `<button class="tiny" id="quota-toggle" title="Hide usage limits">▴</button>`;
   if (!rate || !rate.unifiedWindows) {
-    q.innerHTML = `<span class="note">Usage limits: not checked yet ${refresh}</span>`;
+    q.innerHTML = hidden
+      ? `<span class="note q-sum" id="quota-toggle" title="Show usage limits">Usage: not checked yet <span class="q-open">▾</span></span>`
+      : `<span class="note">Usage limits: not checked yet ${refresh}${hide}</span>`;
     return;
   }
   const prev = store.get("chat.rate", null);
@@ -649,6 +799,18 @@ function renderQuota(rate) {
     return d.toDateString() === now.toDateString() ? time : d.toLocaleDateString([], { weekday: "short" }) + " " + time;
   };
   const names = { five_hour: "5h", seven_day: "7d", seven_day_opus: "7d Opus", seven_day_sonnet: "7d Sonnet" };
+  if (hidden) {                           // one line: "Usage · 5h 41% left · 7d 90% left ▾"
+    const limited = rate.status && rate.status !== "allowed";
+    const parts = Object.entries(rate.unifiedWindows).map(([k, w]) => {
+      const used = Math.max(0, Math.min(1, w.utilization || 0));
+      const cls = used >= 0.9 ? "err" : used >= 0.7 ? "warn" : "";
+      return `<span class="${cls}">${esc(names[k] || k)} ${100 - Math.round(used * 100)}% left</span>`;
+    });
+    q.innerHTML = `<span class="note q-sum" id="quota-toggle" title="Show usage limits">`
+      + (limited ? `<span class="err">Rate limited until ${esc(fmtReset(rate.resetsAt))}</span>` : "Usage · " + parts.join(" · "))
+      + ` <span class="q-open">▾</span></span>`;
+    return;
+  }
   let h = "";
   for (const [k, w] of Object.entries(rate.unifiedWindows)) {
     const used = Math.max(0, Math.min(1, w.utilization || 0)), pct = Math.round(used * 100);
@@ -660,7 +822,7 @@ function renderQuota(rate) {
   if (rate.status && rate.status !== "allowed")
     h += `<span class="note err">Rate limited (${esc(rate.rateLimitType || "")}) until ${esc(fmtReset(rate.resetsAt))}</span>`;
   else
-    h += `<span class="note">as of ${esc(age)} · updated by each message and ↻ ${refresh}</span>`;
+    h += `<span class="note">as of ${esc(age)} · updated by each message and ↻ ${refresh}${hide}</span>`;
   q.innerHTML = h;
   q.title = "Claude usage limits reported by Claude Code. Usage from other sessions (e.g. the terminal) shows up after the next message sent from this panel.";
 }
@@ -668,11 +830,17 @@ function renderQuota(rate) {
 async function checkUsage() {
   const b = $("#quota-refresh");
   if (b) { b.disabled = true; b.textContent = "…"; }
-  const r = await api("/api/agent/usage", {}).catch(() => ({}));
+  const r = await api("/api/agent/usage", { provider: C.provider }).catch(() => ({}));
   renderQuota(r.rate || store.get("chat.rate", null));
   if (r.error) toast(r.error);
 }
-$("#quota").addEventListener("click", (e) => { if (e.target.id === "quota-refresh") checkUsage(); });
+$("#quota").addEventListener("click", (e) => {
+  if (e.target.id === "quota-refresh") return checkUsage();
+  if (e.target.closest("#quota-toggle")) {
+    store.set("chat.quotaHidden", !store.get("chat.quotaHidden", false));
+    renderQuota(lastRate);
+  }
+});
 
 function diffHtml(diff) {
   return diff.split("\n").map((l) => {
@@ -696,11 +864,21 @@ function renderTurnCard(e) {
   } else if (!e.is_error && e.exit === 0) {
     h += `<div class="meta">No files changed.</div>`;
   }
-  if (e.denials && e.denials.length)
-    h += `<div class="warn">Not permitted here: ${esc([...new Set(e.denials)].join(", "))}. Run that step from the terminal session if it is needed.</div>`;
+  const writes = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+  const denied = [...new Set(e.denials || [])];
+  if (e.scope && denied.some((d) => writes.includes(d)))
+    h += `<div class="warn">Blocked edits outside ${esc(e.scope.join(", "))}. Remove the @-mentions to let the agent change other files.</div>`;
+  if (e.reverted && e.reverted.length)
+    h += `<div class="warn">Undid changes outside the @-mentioned files: ${esc(e.reverted.join(", "))}.</div>`;
+  const other = denied.filter((d) => !(e.scope && writes.includes(d)));
+  if (other.length)
+    h += `<div class="warn">Not permitted here: ${esc(other.join(", "))}. Run that step from the terminal session if it is needed.</div>`;
+  if (e.out_of_scope && e.out_of_scope.length)
+    h += `<div class="warn">Changed outside the @-mentioned files: ${esc(e.out_of_scope.join(", "))}. Use Undo this turn if that was not wanted.</div>`;
   if (e.exit !== 0 || e.is_error)
-    h += `<div class="err">Claude exited with ${esc(e.subtype || "exit " + e.exit)}.${e.stderr ? "\n" + esc(e.stderr) : ""}</div>`;
-  const meta = [e.duration ? (e.duration / 1000).toFixed(1) + "s" : "", e.cost ? "$" + e.cost.toFixed(3) : ""].filter(Boolean).join(" · ");
+    h += `<div class="err">${esc((P.byId[e.provider] || {}).label || "The agent")}: ${esc(e.subtype || "exit " + e.exit)}.${e.stderr ? "\n" + esc(e.stderr) : ""}</div>`;
+  const tokens = e.usage && (e.usage.in || e.usage.out) ? `${e.usage.in || 0} in / ${e.usage.out || 0} out tokens` : "";
+  const meta = [e.duration ? (e.duration / 1000).toFixed(1) + "s" : "", e.cost ? "$" + e.cost.toFixed(3) : "", tokens].filter(Boolean).join(" · ");
   if (meta) h += `<div class="meta">${meta}</div>`;
   chatAppend(h, "card");
 }
@@ -721,17 +899,214 @@ $("#chat-log").addEventListener("click", async (ev) => {
   }
 });
 
+/* ------------------------------------------------------------------ slash commands */
+// Each message runs the provider non-interactively (`claude -p`, `codex exec`, or one API
+// conversation), where interactive commands such as /model do not exist. The panel
+// implements those itself. With Claude Code every other /command (skills, /compact,
+// /context, the project's own commands) goes to Claude Code as the first thing in the
+// prompt, which is where Claude Code looks for it; other providers get it as plain text.
+const LOCAL = {
+  help: { args: "", desc: "List the commands you can use here" },
+  provider: { args: "[name]", desc: "Show or switch the AI that runs the agent" },
+  model: { args: "[name]", desc: "Show or set the model for the next messages" },
+  effort: { args: "[level]", desc: "Show or set the effort level" },
+  skills: { args: "", desc: "List the skills Claude Code can use in this project" },
+  mode: { args: "edit|ask", desc: "Edit (may change files) or Ask (read-only)" },
+  clear: { args: "", desc: "Start a new conversation" },
+  new: { args: "", desc: "Start a new conversation" },
+};
+let catalog = null;          // {skills, commands, terminal_only} from /api/agent/commands
+
+async function loadCatalog(refresh = false) {
+  if (catalog && !refresh) return catalog;
+  const q = `?provider=${encodeURIComponent(C.provider || "")}` + (refresh ? "&refresh=1" : "");
+  const r = await api("/api/agent/commands" + q).catch(() => ({}));
+  if (r._status === 200) catalog = r;
+  return catalog;
+}
+function sysNote(html) { chatAppend(html, "msg sys"); saveChatLog(); }
+function chipList(names) {
+  return names.map((n) => `<a class="chip-cmd" data-insert="/${esc(n)} ">/${esc(n)}</a>`).join(" ");
+}
+function settingsLine() {
+  const p = prov();
+  return `provider <b>${esc(provLabel())}</b> · model <b>${esc(C.model || p.default_model || "default")}</b>`
+    + (p.efforts && p.efforts.length ? ` · effort <b>${esc(C.effort || "default")}</b>` : "");
+}
+
+async function runLocal(name, arg) {
+  if (name === "help") {
+    const rows = Object.entries(LOCAL).filter(([n]) => n !== "new")
+      .map(([n, c]) => `<code>/${n}${c.args ? " " + esc(c.args) : ""}</code> — ${esc(c.desc)}`).join("\n");
+    return sysNote(`<b>Commands handled by this panel</b>\n${rows}\n\nWith Claude Code, any other <code>/command</code> — a skill, <code>/compact</code>, <code>/context</code>, or the project's own commands — is passed to Claude Code. Type <code>/</code> to see them all.`);
+  }
+  if (name === "provider") {
+    if (!arg) {
+      const rows = P.list.map((p) => `${p.available ? "" : '<span class="note">'}<code>${esc(p.id)}</code> ${esc(p.label)}${p.available ? "" : " — " + esc(p.reason || "unavailable") + "</span>"}`).join("\n");
+      return sysNote(`Current: ${settingsLine()}\n${rows}\n${chipList(P.list.filter((p) => p.available).map((p) => "provider " + p.id))}`);
+    }
+    return setProvider(arg);
+  }
+  if (name === "model") {
+    const models = prov().models || [];
+    if (!arg) return sysNote(`Current: ${settingsLine()}\nUsage: <code>/model &lt;name&gt;</code> (any model name ${esc(provLabel())} accepts). ${chipList(["default", ...models].map((m) => "model " + m))}`);
+    C.model = arg === "default" ? null : arg; provSet("model", C.model);
+    return sysNote(`Model for the next messages: <b>${esc(C.model || prov().default_model || "default")}</b>`);
+  }
+  if (name === "effort") {
+    const efforts = prov().efforts || [];
+    if (!efforts.length) return sysNote(`${esc(provLabel())} has no effort setting.`);
+    if (!arg) return sysNote(`Current: ${settingsLine()}\nUsage: <code>/effort &lt;level&gt;</code>. ${chipList(["default", ...efforts].map((e) => "effort " + e))}`);
+    if (arg !== "default" && !efforts.includes(arg)) return sysNote(`<span class="err">Effort must be one of: default, ${efforts.join(", ")}</span>`);
+    C.effort = arg === "default" ? null : arg; provSet("effort", C.effort);
+    return sysNote(`Effort for the next messages: <b>${esc(C.effort || "default")}</b>`);
+  }
+  if (name === "skills") {
+    if (!prov().skills) return sysNote(`${esc(provLabel())} has no skills; only Claude Code does.`);
+    sysNote("Loading skills…");
+    const cat = await loadCatalog(arg === "refresh");
+    const last = $("#chat-log").lastElementChild;
+    if (last && last.textContent === "Loading skills…") last.remove();
+    if (!cat) return sysNote(`<span class="err">Could not ask Claude Code for its skills.</span>`);
+    return sysNote(`<b>${cat.skills.length} skills</b> (click one to use it):\n${chipList(cat.skills)}\n\n<small>Refresh with <code>/skills refresh</code>.</small>`);
+  }
+  if (name === "mode") {
+    if (!["edit", "ask"].includes(arg)) return sysNote(`Mode is <b>${$("#chat-mode").value}</b>. Usage: <code>/mode edit</code> or <code>/mode ask</code>.`);
+    $("#chat-mode").value = arg; store.set("chat.mode", arg);
+    return sysNote(`Mode: <b>${arg === "edit" ? "Edit (may change files)" : "Ask (read-only)"}</b>`);
+  }
+  if (name === "clear" || name === "new") return $("#chat-new").onclick();
+}
+
+// Switch provider. Each provider keeps its own conversation, model and effort.
+function setProvider(id, quiet) {
+  const p = P.byId[id];
+  if (!p) return sysNote(`<span class="err">Unknown provider: ${esc(id)}. Try <code>/provider</code>.</span>`);
+  if (C.job) return toast("Wait for the current turn to finish.");
+  C.provider = id; store.set("chat.provider", id); loadProvider();
+  catalog = null;
+  $("#chat-provider").value = id;
+  $("#quota").hidden = !p.usage_limits;
+  if (p.usage_limits) renderQuota(p.rate || store.get("chat.rate", null));
+  if (!quiet) sysNote(p.available
+    ? `Now using <b>${esc(p.label)}</b> (${settingsLine()}). It continues its own conversation; <b>New chat</b> starts over.`
+    : `<span class="err">${esc(p.label)} is not available: ${esc(p.reason || "")}</span>`);
+}
+function renderProviders(info) {
+  P.list = info.providers || [];
+  P.byId = Object.fromEntries(P.list.map((p) => [p.id, p]));
+  $("#chat-provider").innerHTML = P.list.map((p) =>
+    `<option value="${esc(p.id)}"${p.available ? "" : " disabled"} title="${esc(p.reason || "")}">${esc(p.label)}${p.available ? "" : " (not set up)"}</option>`).join("");
+  let id = C.provider;
+  if (!P.byId[id] || !P.byId[id].available) id = info.default;
+  if (!P.byId[id] || !P.byId[id].available) id = (P.list.find((p) => p.available) || P.list[0] || {}).id;
+  if (id) setProvider(id, true);
+  if (info.config_error) chatAppend(`<div class="err">Agent settings: ${esc(info.config_error)}</div>`, "card");
+}
+$("#chat-provider").onchange = (e) => setProvider(e.target.value);
+
+// The prompt for a message starting with "/": the command must come first. Skills take
+// free text, so the referenced files follow the command; built-in commands get none.
+function slashPrompt(text, refs) {
+  const name = text.slice(1).split(/\s/)[0];
+  const isSkill = catalog && catalog.skills.includes(name);
+  return refs && isSkill ? text + "\n\n" + refs : text;
+}
+
+/* Completion menu: "/" at the start of the message lists commands and skills;
+   "@" anywhere lists the editor selection, the open file and the project files. */
+const SM = { items: [], sel: 0, kind: null, at: 0 };
+function slashItems(q) {
+  const seen = new Set(), out = [];
+  const add = (name, desc, kind) => {
+    if (!seen.has(name) && name.startsWith(q)) { seen.add(name); out.push({ label: "/" + name, args: (LOCAL[name] || {}).args, desc, kind, insert: "/" + name + " " }); }
+  };
+  for (const [n, c] of Object.entries(LOCAL)) add(n, c.desc, "panel");
+  if (catalog) {
+    for (const s of catalog.skills) add(s, "", "skill");
+    const hidden = new Set([...(catalog.terminal_only || []), "skills", "model", "effort", "clear"]);
+    for (const c of catalog.commands) if (!hidden.has(c) && !c.startsWith("__")) add(c, "", "Claude Code");
+  }
+  return out.slice(0, 60);
+}
+function mentionItems(q) {
+  const out = [], ql = q.toLowerCase();
+  const sel = selectionMention(), t = activeTab();
+  if (sel && ("selection".startsWith(ql) || sel.token.slice(1).toLowerCase().includes(ql)))
+    out.push({ label: sel.token, desc: "the text selected in the editor", kind: "selection", insert: sel.token, snip: sel.text });
+  if (t && t.path.toLowerCase().includes(ql))
+    out.push({ label: "@" + t.path, desc: "open in the editor", kind: "file", insert: "@" + t.path });
+  for (const f of S.files) {
+    if (t && f.path === t.path) continue;
+    if (f.path.toLowerCase().includes(ql)) out.push({ label: "@" + f.path, desc: "", kind: "file", insert: "@" + f.path });
+  }
+  return out.slice(0, 60);
+}
+function renderPicker() {
+  const m = $("#slash-menu"), inp = $("#chat-input");
+  const v = inp.value, caret = inp.selectionStart ?? v.length;
+  const slash = /^\/([\w:.-]*)$/.exec(v);
+  const at = /(^|\s)@([^\s@]*)$/.exec(v.slice(0, caret));
+  if (slash) {
+    SM.kind = "slash";
+    if (!catalog) loadCatalog().then(() => { if (/^\/[\w:.-]*$/.test(inp.value)) renderPicker(); });
+    SM.items = slashItems(slash[1]);
+  } else if (at) {
+    SM.kind = "mention"; SM.at = caret - at[2].length - 1;
+    SM.items = mentionItems(at[2]);
+  } else { m.hidden = true; return; }
+  SM.sel = Math.min(SM.sel, Math.max(0, SM.items.length - 1));
+  if (!SM.items.length) { m.hidden = true; return; }
+  m.innerHTML = SM.items.map((it, i) => `<div class="sm-item${i === SM.sel ? " sel" : ""}" data-i="${i}">
+    <span class="sm-name">${esc(it.label)}${it.args ? ` <i>${esc(it.args)}</i>` : ""}</span>
+    <span class="sm-desc">${esc(it.desc)}</span><span class="sm-kind">${esc(it.kind)}</span></div>`).join("")
+    + (SM.kind === "slash" && !catalog ? `<div class="sm-more">loading skills…</div>` : "");
+  m.hidden = false;
+  const sel = m.querySelector(".sel"); if (sel) sel.scrollIntoView({ block: "nearest" });
+}
+function acceptPick(i) {
+  const it = SM.items[i]; if (!it) return;
+  $("#slash-menu").hidden = true;
+  if (SM.kind === "slash") { $("#chat-input").value = it.insert; $("#chat-input").focus(); updateScope(); }
+  else insertMention(it.insert, it.snip, SM.at);
+}
+$("#chat-input").addEventListener("input", () => { SM.sel = 0; renderPicker(); });
+$("#chat-input").addEventListener("keydown", (e) => {
+  if ($("#slash-menu").hidden) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault(); e.stopImmediatePropagation();
+    SM.sel = (SM.sel + (e.key === "ArrowDown" ? 1 : -1) + SM.items.length) % SM.items.length; renderPicker();
+  } else if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.isComposing)) {
+    e.preventDefault(); e.stopImmediatePropagation(); acceptPick(SM.sel);
+  } else if (e.key === "Escape") { e.stopImmediatePropagation(); $("#slash-menu").hidden = true; }
+});
+$("#slash-menu").addEventListener("mousedown", (e) => {
+  const it = e.target.closest(".sm-item"); if (it) { e.preventDefault(); acceptPick(+it.dataset.i); }
+});
+$("#chat-input").addEventListener("blur", () => setTimeout(() => { $("#slash-menu").hidden = true; }, 150));
+$("#chat-log").addEventListener("click", (e) => {
+  const a = e.target.closest("[data-insert]"); if (!a) return;
+  const v = a.dataset.insert;
+  // "/model opus" style chips run at once; skill chips are filled in for you to finish.
+  if (/^\/(model|effort|provider) /.test(v)) { $("#chat-input").value = v.trim(); chatSend(); }
+  else { $("#chat-input").value = v; $("#chat-input").focus(); updateScope(); }
+});
+
 $("#chat-send").onclick = () => { if (C.job) api("/api/agent/stop", { job: C.job }); else chatSend(); };
 $("#chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(); }
 });
 $("#chat-new").onclick = () => {
   if (C.job) return;
-  C.session = null; store.set("chat.session", null);
+  C.session = null; provSet("session", null);
+  if (C.provider === "claude") store.set("chat.session", null);    // the key from before providers
   $("#chat-log").innerHTML = ""; chatIntro(); saveChatLog();
 };
 function askAboutSelection() {
-  chatHidden(false); $("#chat-ctx").checked = true; updateCtxLabel(); $("#chat-input").focus();
+  chatHidden(false);
+  const sel = selectionMention();
+  if (sel) insertMention(sel.token, sel.text);
+  else { const t = activeTab(); if (t) insertMention("@" + t.path); else $("#chat-input").focus(); }
 }
 cm.setOption("extraKeys", { ...cm.getOption("extraKeys"), "Cmd-L": askAboutSelection, "Ctrl-L": askAboutSelection });
 {
@@ -741,10 +1116,12 @@ cm.setOption("extraKeys", { ...cm.getOption("extraKeys"), "Cmd-L": askAboutSelec
   $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
   renderQuota(store.get("chat.rate", null));
   api("/api/agent/info").then((r) => {
-    if (r.rate) renderQuota(r.rate);
-    const known = r.rate || store.get("chat.rate", null);
-    if (r.available && (!known || !known.at || Date.now() / 1000 - known.at > 600)) checkUsage();
-    if (!r.available) chatAppend(`<div class="err">Claude Code CLI not found. Start the editor with CLAUDE_BIN=/path/to/claude.</div>`, "card"); });
+    renderProviders(r);
+    const p = prov();
+    if (!p.available) return chatAppend(`<div class="err">${esc(p.reason || "No AI provider is set up.")}</div>`, "card");
+    const known = p.rate || store.get("chat.rate", null);
+    if (p.usage_limits && (!known || !known.at || Date.now() / 1000 - known.at > 600)) checkUsage();
+  });
 }
 
 /* ------------------------------------------------------------------ start */
@@ -762,3 +1139,4 @@ cm.setOption("extraKeys", { ...cm.getOption("extraKeys"), "Cmd-L": askAboutSelec
   renderProblems();
   setInterval(poll, 2000);
 })();
+updateScope();

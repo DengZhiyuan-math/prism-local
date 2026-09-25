@@ -32,6 +32,10 @@ if (pdfChannel) {
       window.focus();
     }
   };
+  // Hold this lock while the tab lives: the browser drops it when the tab closes or
+  // crashes, which is how the editor knows the viewer is gone (see app.js).
+  if (navigator.locks && navigator.locks.request)
+    navigator.locks.request("prism-pdf-viewer", () => new Promise(() => {}));
   const alive = () => pdfChannel.postMessage({ type: "alive" });
   alive(); setInterval(alive, 2000);
   window.addEventListener("pagehide", () => pdfChannel.postMessage({ type: "bye" }));

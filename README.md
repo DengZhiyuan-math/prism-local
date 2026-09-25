@@ -4,20 +4,24 @@ A local, Overleaf/Prism-style studio for LaTeX projects on your own machine:
 
 - **Editor**: CodeMirror 5 with tabs, LaTeX highlighting and search. It autocompletes
   `\cref{…}`/`\eqref{…}` from your labels, `\cite{…}` from your `.bib` files, and `\…` from your
-  own `\newcommand`s. An insert menu offers your `\newtheorem` environments.
+  own `\newcommand`s.
 - **Compile and see errors**: one click (⌘↵) builds the project. Errors and warnings
   (undefined references and citations included) are listed with their source lines, and a click
   jumps to the line.
 - **PDF preview with SyncTeX**: the preview reloads after every build and keeps its scroll position.
   Double-click the PDF to jump to the source; ⌘J jumps from the source to the PDF. The PDF can
   **pop out into its own tab** and stays in sync there.
-- **✦ Claude panel**: an AI agent that edits your project. It runs your local
-  [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI in the project directory.
-  Every turn ends with a per-file diff and **Undo this turn**. The panel also shows your
-  remaining 5-hour and 7-day Claude usage limits.
+- **✦ Agent panel**: an AI agent that edits your project. Pick who runs it: your local
+  [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or
+  [Codex](https://github.com/openai/codex) CLI, or an API model with a key: DeepSeek, OpenAI,
+  OpenRouter, Qwen, Kimi, or a local Ollama/vLLM. Every turn ends with a per-file diff and
+  **Undo this turn**. With Claude Code the panel also shows your remaining 5-hour and 7-day
+  usage limits.
 - **Home page**: all your projects in one place, with PDF thumbnails, titles, git state and
   which ones are open. Create a project from a template, add an existing folder, pin, rename
   or open any project in one click. The ⌂ button in the editor brings you back.
+- **Autosave**: edits are saved a moment after you stop typing, as in Overleaf. There is no
+  Save button. Auto-compile (in the Compile menu) builds shortly after that.
 - **Works with other tools**: files changed on disk (by Claude Code in a terminal, `git
   checkout`, another editor) reload automatically. A save never silently overwrites a newer
   version on disk.
@@ -30,11 +34,18 @@ needs nothing from npm. The front-end libraries are vendored, so it also works o
 - Python ≥ 3.9 (tested with 3.11)
 - A LaTeX build tool:
   - [Tectonic](https://tectonic-typesetting.github.io/), used by default if it is on `PATH`, or
-  - `latexmk` with a TeX distribution, used if Tectonic is not found, or
+  - `latexmk` with a TeX distribution, used if Tectonic is not found. latexmk is a Perl
+    script. On Windows, where Perl is rarely on `PATH` (MiKTeX does not ship it), builds use
+    the Perl that comes with Git for Windows if no other is found. Otherwise install
+    [Strawberry Perl](https://strawberryperl.com). Or
   - any command you configure in `prism.json`.
 - Optional: `git`, for the file status markers and the Diff view.
-- Optional: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), for the Claude panel.
-  You must be logged in (`claude` works in your terminal).
+- Optional, for the agent panel, one of:
+  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code), logged in (`claude` works
+    in your terminal);
+  - [Codex CLI](https://github.com/openai/codex), logged in (`codex` works in your terminal);
+  - an API key for DeepSeek or another OpenAI-compatible API, in an environment variable (see
+    [Choosing the AI](#choosing-the-ai-claude-code-codex-deepseek-and-other-apis)).
 
 ## Quick start
 
@@ -161,7 +172,7 @@ python launcher/prism_launcher.pyw --home         # the Home page
 
 | Key | Action |
 |---|---|
-| ⌘S / Ctrl-S | Save |
+| ⌘S / Ctrl-S | Save now (edits are saved automatically anyway) |
 | ⌘↵ / Ctrl-Enter | Save all and compile |
 | ⌘J / Ctrl-J | Show the cursor line in the PDF |
 | double-click in PDF | Jump to the source line |
@@ -193,11 +204,7 @@ Place `prism.json` in the project root. Every key is optional:
     "check":  "scripts/check.sh"
   },
   "files":   ["main.tex", "chapters/**/*.tex", "*.bib"],
-  "exclude": ["drafts/old/**"],
-  "labelPrefixes": { "claim": "clm" },
-  "snippets": [
-    { "name": "TODO marker", "text": "% TODO: ", "caret": 8 }
-  ]
+  "exclude": ["drafts/old/**"]
 }
 ```
 
@@ -210,18 +217,49 @@ Place `prism.json` in the project root. Every key is optional:
 - `files`: globs for the file tree. By default every `.tex/.bib/.md/.sty/.cls/.txt` file is listed,
   skipping hidden directories, `outdir` and `node_modules`.
 - `exclude`: globs to hide from the file tree.
-- `labelPrefixes`: label prefixes for inserted environments. The defaults are `thm`, `lem`, `prop`,
-  `cor`, `def`, `rem`, `ex`, `eq`, …
-- `snippets`: extra entries for the Insert menu. `caret` is the cursor offset within the first line.
 
-## The Claude panel
+## The agent panel
+
+This section describes the panel with Claude Code, the default. The next section covers the
+other providers and what differs for them.
 
 Each message runs Claude Code headlessly in your project:
 
 ```
 claude -p --output-format stream-json --verbose --include-partial-messages \
-       --permission-mode <acceptEdits|plan> [--resume <session>] --append-system-prompt <…>
+       --permission-mode <acceptEdits|plan> [--resume <session>] [--model <m>] [--effort <e>] \
+       --append-system-prompt <…>
 ```
+
+**Slash commands.** Type `/` in the message box to see every command and skill, with completion
+(↑↓ to choose, Tab or ↵ to take one).
+
+- The panel itself handles the commands that only exist in Claude Code's interactive terminal:
+  - `/model [name]` shows or sets the model for the next messages (`/model default` to reset).
+  - `/effort [level]` does the same for the effort level (`low` … `max`).
+  - `/skills` lists the skills Claude Code can use in this project. Click one to use it.
+  - `/provider [name]` shows the providers or switches to one (same as the menu in the panel).
+  - `/mode edit|ask`, `/clear` (or `/new`), and `/help`.
+- Everything else goes to Claude Code as the first thing in the prompt, where it looks for a
+  command: skills such as `/code-review`, built-ins that work headlessly such as `/compact`
+  and `/context`, and your project's own commands.
+- A skill gets the editor context after the command, so it knows what "this" refers to.
+  Built-in commands get none.
+- Commands that need Claude Code's terminal (for example `/doctor`) are not offered here.
+
+**@-mentions decide what Claude may change.** Type `@` to pick a project file, or the text
+selected in the editor (also: select text and press ⌘L). A selection becomes a mention like
+`@sections/intro.tex:12-18`, and its text is sent along.
+
+- **With @-mentions**, Claude may change only the mentioned files. This is enforced, not just
+  asked: the turn runs in Claude Code's default permission mode with `Edit`/`Write` allowed
+  for those files only, so any other write is refused. For a line range, Claude is asked to
+  keep to those lines.
+- **Without @-mentions**, Claude may change any file in the project and create new ones.
+- The line above the message box shows the scope before you send. The card at the end of a
+  turn reports blocked edits, and any change outside the mentioned files (for example made
+  by an allowed shell command), which **Undo this turn** reverts.
+- Each message states its own scope, so a limit from an earlier message does not carry over.
 
 Consequences:
 
@@ -231,8 +269,7 @@ Consequences:
   shell commands are limited to the `permissions.allow` list in `.claude/settings.json`, and
   anything else is refused. The card at the end of a turn names any refused tools.
 - **Ask** mode (`plan`) is read-only.
-- Messages include the open file, the cursor line and the selection. Untick "Attach" to send
-  the message without them.
+- Nothing from the editor is sent unless you @-mention it.
 - The conversation continues across messages until you press **New chat**.
 - After each turn, a card lists the changed files with diffs and offers **Undo this turn**.
   - Undo restores a file only if nobody edited it since that turn.
@@ -246,6 +283,78 @@ Consequences:
   - Usage from other sessions shows up at the next update.
 - The panel finds the CLI on `PATH`. Set `CLAUDE_BIN=/path/to/claude` to override. Start
   prism-local from the same environment you use for `claude`, including any `CLAUDE_CONFIG_DIR`.
+
+## Choosing the AI: Claude Code, Codex, DeepSeek and other APIs
+
+The menu at the top of the panel (or `/provider <name>`) picks who runs the agent. Each
+provider keeps its own conversation, model and effort, so you can switch back and forth.
+Providers that are not set up are greyed out; hover one to see what it needs.
+
+| Provider | Kind | Set up with |
+|---|---|---|
+| `claude` | Claude Code CLI | `claude` on `PATH`, or `CLAUDE_BIN` |
+| `codex` | Codex CLI | `codex` on `PATH`, or `CODEX_BIN`; `codex login` |
+| `deepseek` | API | `DEEPSEEK_API_KEY` |
+| `openai` | API | `OPENAI_API_KEY` |
+| `openrouter` | API | `OPENROUTER_API_KEY` |
+| `qwen` | API (DashScope) | `DASHSCOPE_API_KEY` |
+| `moonshot` | API (Kimi) | `MOONSHOT_API_KEY` |
+| `ollama` | API, local | Ollama running on `127.0.0.1:11434`; no key |
+
+API keys are read from environment variables only, never from a file in your project. On
+Windows, set one for your user once and restart prism-local:
+
+```powershell
+setx DEEPSEEK_API_KEY "sk-..."
+```
+
+**Codex CLI.** Each message runs `codex exec --json` in the project, with the sandbox set to
+`workspace-write` in Edit mode and `read-only` in Ask mode, and `resume` to continue the
+conversation. Codex reads your `AGENTS.md`. `/effort` sets `model_reasoning_effort`
+(`minimal` … `xhigh`). Codex cannot be limited to single files, so with @-mentions prism-local
+**undoes any change it made outside the mentioned files** when the turn ends, and says so.
+
+**API providers (DeepSeek and others).** There is no agent CLI, so prism-local runs the agent
+loop itself over the OpenAI chat-completions API with function calling. The model gets five
+tools: `list_files`, `read_file` and `search`, plus `write_file` and `edit_file` in Edit mode,
+only for files the turn may change. It cannot run shell commands or compile. Your
+`CLAUDE.md` / `AGENTS.md` is added to its instructions. The model must support function
+calling (DeepSeek's `deepseek-chat` does). The conversation lives in server memory and ends
+when the server stops. The card at the end of a turn shows the tokens used.
+
+**Your own providers and defaults** go in `~/.prism-local/agents.json` (or the file named by
+`PRISM_AGENTS`). Any OpenAI-compatible endpoint works:
+
+```json
+{
+  "default": "deepseek",
+  "providers": {
+    "deepseek": { "default_model": "deepseek-reasoner" },
+    "codex": { "bin": "C:/Users/me/AppData/Roaming/npm/codex.cmd" },
+    "ollama": { "enabled": false },
+    "my-vllm": {
+      "type": "openai",
+      "label": "vLLM on the GPU box",
+      "base_url": "http://gpu-box:8000/v1",
+      "api_key_env": "MY_VLLM_KEY",
+      "models": ["qwen3-32b"]
+    }
+  }
+}
+```
+
+- An entry with the name of a built-in provider changes only the fields it gives.
+- Fields: `type` (`claude`, `codex` or `openai`), `label`, `bin` (CLIs), `base_url`,
+  `api_key_env` (omit it for a server that needs no key), `models` (suggestions for `/model`;
+  the first is the default), `default_model`, `efforts` (for APIs that take
+  `reasoning_effort`), `headers`, `max_steps` (tool rounds per message, default 40),
+  `timeout` (seconds), `enabled`.
+- `PRISM_AGENT=<name>` picks the default provider for one run.
+
+**Adding another kind of backend** (another agent CLI, or an API that is not OpenAI-compatible):
+subclass `Backend` in `prism_local/backends.py`, or `CliBackend` for a CLI that prints JSON
+lines, and register it in `load_backends`. The docstring of `backends.py` lists the events the
+panel understands. The agent manager takes care of scopes, diffs and undo for every backend.
 
 ## Security model
 
@@ -261,8 +370,10 @@ prism-local is meant for a single user on their own machine.
   the same origin, so other sites cannot keep the server running.
 - It reads and writes only text source files inside the project directory. Hidden directories
   and the build directory are excluded.
-- Anyone who can reach the port can run your build commands and the Claude agent. Do not expose
+- Anyone who can reach the port can run your build commands and the agent. Do not expose
   the port to a network: no port forwarding, no `0.0.0.0`.
+- With an API provider, the files the model reads and your messages are sent to that
+  provider's `base_url`. The key stays in the server's environment and never reaches the page.
 
 ## Layout
 
@@ -274,7 +385,9 @@ prism_local/server.py      HTTP server: files, builds, log parsing, SyncTeX, idl
 prism_local/hub.py         Home page server: project list, templates, starting editors
 prism_local/registry.py    shared state: project list, running instances, ports
 prism_local/presence.py    which pages are open, for --exit-when-idle
-prism_local/agent.py       Claude Code runner, per-turn diffs and undo, usage limits
+prism_local/agent.py       agent turns for every provider: scope, per-turn diffs and undo
+prism_local/backends.py    the backend interface, presets and ~/.prism-local/agents.json
+prism_local/backend_*.py   Claude Code, Codex CLI and OpenAI-compatible API backends
 prism_local/static/        front end (app.js, pdfview.js, viewer.*, home.*, common.js, app.css)
 prism_local/static/vendor/ CodeMirror 5.65.18 (MIT), PDF.js 3.11.174 (Apache-2.0)
 examples/minimal/          a small amsart project to try it on

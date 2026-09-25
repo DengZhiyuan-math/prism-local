@@ -15,21 +15,10 @@
   <button id="btn-home" class="tiny" title="All projects (Home page)">⌂</button>
   <div class="brand"><span class="logo">∂</span> <span id="projname">prism-local</span></div>
   <div class="actions">
-    <div class="split-btn">
-      <button id="btn-compile" class="primary" title="Save all and compile (⌘↵)">▶ Compile</button>
-      <select id="build-mode" title="Build mode">
-        <option value="draft">Draft (continue on errors)</option>
-        <option value="strict">Strict (stop at first error)</option>
-        <option value="check">Check</option>
-      </select>
-    </div>
-    <label class="toggle" title="Compile automatically after saving"><input type="checkbox" id="auto-compile"> Auto-compile on save</label>
-    <span id="build-status" class="status">idle</span>
+    <span id="build-status" class="status"></span>
   </div>
   <div class="actions right">
-    <button id="btn-popout" title="Open the PDF in a separate tab (stays in sync)">⧉ PDF</button>
-    <button id="btn-chat" title="Show/hide the Claude panel (⌘L sends the selection)">✦ Claude</button>
-    <button id="btn-diff" title="git diff of the manuscript">Diff</button>
+    <button id="btn-chat" title="Show/hide the agent panel (⌘L sends the selection)">✦ Agent</button>
     <button id="btn-theme" title="Toggle light/dark">◐</button>
   </div>
 </header>
@@ -50,8 +39,6 @@
   <section id="editor-pane">
     <div id="tabs"></div>
     <div id="toolbar">
-      <select id="insert" title="Insert environment"><option value="">Insert…</option></select>
-      <button id="btn-save" title="Save (⌘S)">Save</button>
       <button id="btn-forward" title="Show this line in the PDF (⌘J)">→ PDF</button>
       <span class="hint">Double-click PDF to jump to source · ⌘F search · Ctrl-Space complete</span>
     </div>
@@ -63,6 +50,16 @@
 
   <section id="pdf-pane">
     <div id="pdf-toolbar">
+      <div id="compile-box" class="split-btn">
+        <button id="btn-compile" class="primary" title="Save all and compile (⌘↵)">▶ Compile</button>
+        <button id="btn-compile-menu" class="primary caret" title="Build mode and auto-compile" aria-haspopup="menu" aria-expanded="false"><span id="compile-mode-label">Draft</span> ▾</button>
+        <div id="compile-menu" class="dropdown" role="menu" hidden>
+          <div class="dd-head">Build mode</div>
+          <div id="build-modes"></div>
+          <hr>
+          <label class="dd-item" title="Compile automatically a moment after you stop typing"><input type="checkbox" id="auto-compile"> Auto-compile</label>
+        </div>
+      </div>
       <button id="zoom-out" title="Zoom out">−</button>
       <span id="zoom-label">100%</span>
       <button id="zoom-in" title="Zoom in">+</button>
@@ -76,7 +73,8 @@
 
   <aside id="chat">
     <div id="chat-head">
-      <b>✦ Claude</b>
+      <b>✦</b>
+      <select id="chat-provider" title="Which AI runs the agent. Add API providers in ~/.prism-local/agents.json (see README)."></select>
       <select id="chat-mode" title="Edit: may change files (you review a diff and can undo). Ask: read-only.">
         <option value="edit">Edit</option>
         <option value="ask">Ask (read-only)</option>
@@ -86,10 +84,9 @@
     <div id="quota"></div>
     <div id="chat-log"></div>
     <div id="chat-foot">
-      <label id="chat-ctx-label" title="Send the open file, cursor line and selection with the message">
-        <input type="checkbox" id="chat-ctx" checked> <span id="chat-ctx-text">Attach editor context</span>
-      </label>
-      <textarea id="chat-input" rows="3" placeholder="Ask Claude to explain, check or revise… (↵ send, ⇧↵ newline)"></textarea>
+      <div id="chat-scope"></div>
+      <div id="slash-menu" role="listbox" hidden></div>
+      <textarea id="chat-input" rows="3" placeholder="Ask the agent… @ a file or the selection to limit its edits, / for commands (↵ send, ⇧↵ newline)"></textarea>
       <div class="chat-actions">
         <span id="chat-status" class="status"></span>
         <button id="chat-send" class="primary">Send</button>
