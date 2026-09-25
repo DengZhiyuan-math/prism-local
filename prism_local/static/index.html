@@ -11,18 +11,18 @@
 </head>
 <body>
 <header id="top">
-  <button id="btn-sidebar" class="icon" title="Show/hide the Files sidebar (⌘B)">☰</button>
-  <button id="btn-home" class="icon" title="All projects (Home page)">⌂</button>
+  <button id="btn-sidebar" class="icon" data-icon="menu" title="Show/hide the Files sidebar (⌘B)" aria-label="Files sidebar"></button>
+  <button id="btn-home" class="icon" data-icon="home" title="All projects (Home page)" aria-label="Home"></button>
   <div class="brand"><span class="logo">∂</span> <span id="projname">prism-local</span></div>
   <div class="actions">
     <span id="build-status" class="status"></span>
   </div>
   <div class="actions right">
     <div id="agent-box" class="split-btn">
-      <button id="btn-chat" title="Show/hide the agent panel (⌘L sends the selection)">✦ Agent</button>
+      <button id="btn-chat" data-icon="spark" title="Show/hide the agent panel (⌘L sends the selection)">Agent</button>
       <select id="chat-provider" title="Which AI runs the agent. Add API providers in ~/.prism-local/agents.json (see README)."></select>
     </div>
-    <button id="btn-theme" class="icon" title="Toggle light/dark">◐</button>
+    <button id="btn-theme" class="icon" data-icon="theme" title="Toggle light/dark" aria-label="Theme"></button>
   </div>
 </header>
 
@@ -33,7 +33,7 @@
       <ul id="tree"></ul>
     </section>
     <section class="grow">
-      <h3>Outline <button id="btn-refresh-outline" class="tiny" title="Refresh">↻</button></h3>
+      <h3>Outline <button id="btn-refresh-outline" class="tiny icon ghost" data-icon="refresh" title="Refresh" aria-label="Refresh outline"></button></h3>
       <ul id="outline"></ul>
     </section>
   </aside>
@@ -42,7 +42,7 @@
   <section id="editor-pane">
     <div id="editor-head">
       <div id="tabs"></div>
-      <button id="btn-forward" class="ghost" title="Show this line in the PDF (⌘J). Double-click the PDF to jump back to the source. ⌘F search · Ctrl-Space complete">→ PDF</button>
+      <button id="btn-forward" class="ghost" data-icon="arrow" title="Show this line in the PDF (⌘J). Double-click the PDF to jump back to the source. ⌘F search · Ctrl-Space complete">PDF</button>
     </div>
     <div id="banner" hidden></div>
     <div id="editor"></div>
@@ -53,8 +53,8 @@
   <section id="pdf-pane">
     <div id="pdf-toolbar">
       <div id="compile-box" class="split-btn">
-        <button id="btn-compile" class="primary" title="Save all and compile (⌘↵)">▶ Compile</button>
-        <button id="btn-compile-menu" class="primary caret" title="Build mode and auto-compile" aria-haspopup="menu" aria-expanded="false"><span id="compile-mode-label">Draft</span> ▾</button>
+        <button id="btn-compile" class="primary" data-icon="play" title="Save all and compile (⌘↵)">Compile</button>
+        <button id="btn-compile-menu" class="primary caret" title="Build mode and auto-compile" aria-haspopup="menu" aria-expanded="false" data-icon-end="down"><span id="compile-mode-label">Draft</span></button>
         <div id="compile-menu" class="dropdown" role="menu" hidden>
           <div class="dd-head">Build mode</div>
           <div id="build-modes"></div>
@@ -62,12 +62,12 @@
           <label class="dd-item" title="Compile automatically a moment after you stop typing"><input type="checkbox" id="auto-compile"> Auto-compile</label>
         </div>
       </div>
-      <button id="zoom-out" class="icon" title="Zoom out">−</button>
+      <button id="zoom-out" class="icon" data-icon="minus" title="Zoom out" aria-label="Zoom out"></button>
       <span id="zoom-label">100%</span>
-      <button id="zoom-in" class="icon" title="Zoom in">+</button>
+      <button id="zoom-in" class="icon" data-icon="plus" title="Zoom in" aria-label="Zoom in"></button>
       <button id="zoom-fit" title="Fit width">Fit</button>
       <span id="page-label"></span>
-      <a id="pdf-popout" class="btn ghost" href="/viewer" title="Open the PDF in a separate tab (stays in sync)">⧉ Pop out</a>
+      <a id="pdf-popout" class="btn ghost" data-icon="popout" href="/viewer" title="Open the PDF in a separate tab (stays in sync)">Pop out</a>
     </div>
     <div id="pdf-scroll"><div id="pdf-pages"></div><div id="pdf-empty">No PDF yet — press Compile.</div></div>
   </section>
@@ -75,7 +75,7 @@
 
   <aside id="chat">
     <div id="chat-head">
-      <b>✦</b>
+      <b data-icon="spark" aria-label="Agent"></b>
       <select id="chat-mode" title="Edit: may change files (you review a diff and can undo). Ask: read-only.">
         <option value="edit">Edit</option>
         <option value="ask">Ask (read-only)</option>
@@ -101,7 +101,7 @@
     <button data-panel="problems" class="active">Problems <span id="problem-count" class="badge"></span></button>
     <button data-panel="output">Output</button>
     <button data-panel="diff">Diff</button>
-    <button id="panel-toggle" class="icon ghost" title="Show/hide panel">▴</button>
+    <button id="panel-toggle" class="icon ghost" data-icon="up" title="Show/hide panel" aria-label="Show/hide panel"></button>
   </div>
   <div id="panel-body">
     <ul id="problems" class="panel-view"></ul>

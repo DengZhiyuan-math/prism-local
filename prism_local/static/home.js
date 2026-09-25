@@ -89,7 +89,7 @@ function cardHTML(p) {
         <div class="path" title="${esc(p.path)}"><bdi>${esc(p.path)}</bdi></div>
         <div class="meta"><span class="chip err">moved or deleted</span></div></div>
       <div class="foot"><button class="open" data-act="remove">Remove from list</button>
-        <button class="more" data-act="menu" title="More">⋯</button></div></div>`;
+        <button class="more icon" data-act="menu" title="More" aria-label="More">${icon("more")}</button></div></div>`;
   }
   const title = p.title && p.title.toLowerCase() !== p.name.toLowerCase() ? `<div class="title" title="${esc(p.title)}">${esc(p.title)}</div>` : "";
   const meta = [
@@ -101,7 +101,7 @@ function cardHTML(p) {
     <div class="thumb" data-act="open" title="Open ${esc(p.name)}">
       <div class="ph"><div class="ini">${initials(p.name)}</div><small>${p.pdf_mtime ? "" : "No PDF yet"}</small></div>
       ${run}
-      <button class="pin ${p.pinned ? "on" : ""}" data-act="pin" title="${p.pinned ? "Unpin" : "Pin to top"}">${p.pinned ? "★" : "☆"}</button>
+      <button class="pin ${p.pinned ? "on" : ""}" data-act="pin" title="${p.pinned ? "Unpin" : "Pin to top"}">${icon("star")}</button>
     </div>
     <div class="body">
       <div class="name" data-act="open" title="${esc(p.name)}">${esc(p.name)}</div>
@@ -111,7 +111,7 @@ function cardHTML(p) {
     </div>
     <div class="foot">
       <button class="open ${p.running ? "" : "primary"}" data-act="open" ${busy ? "disabled" : ""}>${busy ? "Starting…" : p.running ? "Show editor" : "Open"}</button>
-      <button class="more" data-act="menu" title="More actions">⋯</button>
+      <button class="more icon" data-act="menu" title="More actions" aria-label="More actions">${icon("more")}</button>
     </div>
   </div>`;
 }
@@ -335,7 +335,7 @@ function updateGithubRow() {
   $("#gh-owner").textContent = `github.com/${(H.settings && H.settings.github_owner) || gh.account || "…"}/ · private`;
   const note = f.querySelector(".gh-note");
   note.hidden = !!gh.logged_in;
-  note.textContent = gh.logged_in ? "" : (gh.error || "GitHub is not connected.") + " See ⚙ Settings.";
+  note.textContent = gh.logged_in ? "" : (gh.error || "GitHub is not connected.") + " See Settings (top right).";
 }
 $("#form-new").addEventListener("submit", async (e) => {
   e.preventDefault();

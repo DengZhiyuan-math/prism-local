@@ -424,7 +424,7 @@ function applyDiagnostics() {
 
 /* ------------------------------------------------------------------ bottom panel & diff */
 function openPanel(name) {
-  $("#panel").classList.remove("collapsed"); $("#panel-toggle").textContent = "▾";
+  $("#panel").classList.remove("collapsed"); $("#panel-toggle").classList.add("flip");
   document.querySelectorAll("#panel-tabs [data-panel]").forEach((b) => b.classList.toggle("active", b.dataset.panel === name));
   document.querySelectorAll(".panel-view").forEach((v) => { v.hidden = v.id !== name; });
   cm.refresh();
@@ -434,7 +434,7 @@ $("#panel-tabs").addEventListener("click", (e) => {
 });
 $("#panel-toggle").onclick = () => {
   const p = $("#panel"); p.classList.toggle("collapsed");
-  $("#panel-toggle").textContent = p.classList.contains("collapsed") ? "▴" : "▾"; cm.refresh();
+  $("#panel-toggle").classList.toggle("flip", !p.classList.contains("collapsed")); cm.refresh();
 };
 async function showDiff(path) {
   const r = await api("/api/diff" + (path ? "?path=" + encodeURIComponent(path) : ""));
@@ -782,11 +782,11 @@ function renderQuota(rate) {
   lastRate = rate;
   const hidden = store.get("chat.quotaHidden", false);
   q.classList.toggle("collapsed", hidden);
-  const refresh = `<button class="tiny" id="quota-refresh" title="Check usage now (a tiny Haiku call, ≈ $0.001)">↻</button>`;
-  const hide = `<button class="tiny" id="quota-toggle" title="Hide usage limits">▴</button>`;
+  const refresh = `<button class="tiny icon ghost" id="quota-refresh" title="Check usage now (a tiny Haiku call, ≈ $0.001)">${icon("refresh")}</button>`;
+  const hide = `<button class="tiny icon ghost" id="quota-toggle" title="Hide usage limits">${icon("up")}</button>`;
   if (!rate || !rate.unifiedWindows) {
     q.innerHTML = hidden
-      ? `<span class="note q-sum" id="quota-toggle" title="Show usage limits">Usage: not checked yet <span class="q-open">▾</span></span>`
+      ? `<span class="note q-sum" id="quota-toggle" title="Show usage limits">Usage: not checked yet <span class="q-open">${icon("down")}</span></span>`
       : `<span class="note">Usage limits: not checked yet ${refresh}${hide}</span>`;
     return;
   }
@@ -808,7 +808,7 @@ function renderQuota(rate) {
     });
     q.innerHTML = `<span class="note q-sum" id="quota-toggle" title="Show usage limits">`
       + (limited ? `<span class="err">Rate limited until ${esc(fmtReset(rate.resetsAt))}</span>` : "Usage · " + parts.join(" · "))
-      + ` <span class="q-open">▾</span></span>`;
+      + ` <span class="q-open">${icon("down")}</span></span>`;
     return;
   }
   let h = "";
@@ -822,7 +822,7 @@ function renderQuota(rate) {
   if (rate.status && rate.status !== "allowed")
     h += `<span class="note err">Rate limited (${esc(rate.rateLimitType || "")}) until ${esc(fmtReset(rate.resetsAt))}</span>`;
   else
-    h += `<span class="note">as of ${esc(age)} · updated by each message and ↻ ${refresh}${hide}</span>`;
+    h += `<span class="note">as of ${esc(age)} · updated by each message and ${refresh}${hide}</span>`;
   q.innerHTML = h;
   q.title = "Claude usage limits reported by Claude Code. Usage from other sessions (e.g. the terminal) shows up after the next message sent from this panel.";
 }

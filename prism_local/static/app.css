@@ -51,6 +51,13 @@ button.icon { width: var(--ctl-h); padding: 0; font-size: 15px; }
 button.tiny { height: var(--ctl-h-sm); padding: 0 8px; font-size: 11.5px; border-radius: 5px; }
 button.tiny.icon { width: var(--ctl-h-sm); padding: 0; font-size: 12px; }
 button:disabled { opacity: .5; cursor: default; }
+/* Line icons (common.js): same size, stroke and centre everywhere. */
+.ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8;
+  stroke-linecap: round; stroke-linejoin: round; }
+button.tiny .ico { width: 14px; height: 14px; }
+.ico.end { width: 14px; height: 14px; margin-right: -2px; }
+button.flip .ico { transform: rotate(180deg); }
+#chat-head b { display: inline-flex; }
 
 /* ---------- top bar */
 #top {
@@ -114,11 +121,18 @@ button:disabled { opacity: .5; cursor: default; }
 #editor-pane { flex: 1; min-width: 200px; display: flex; flex-direction: column; background: var(--cm-bg); position: relative; }
 #editor-head { display: flex; align-items: center; height: var(--bar-h); flex: none; background: var(--panel2); border-bottom: 1px solid var(--border); }
 #editor-head #btn-forward { margin: 0 6px; }
-#tabs { display: flex; align-self: stretch; overflow-x: auto; overflow-y: hidden; flex: 1; min-width: 0; scrollbar-width: thin; }
-.tab { padding: 0 10px 0 12px; border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; display: flex; gap: 6px; align-items: center; color: var(--muted); }
-.tab.active { background: var(--cm-bg); color: var(--text); }
-.tab .close { opacity: .5; font-size: 14px; line-height: 1; }
-.tab .close:hover { opacity: 1; }
+#tabs { display: flex; align-items: center; gap: 2px; padding: 0 6px; align-self: stretch; overflow-x: auto; overflow-y: hidden; flex: 1; min-width: 0; scrollbar-width: none; }
+.tab {
+  height: var(--ctl-h); padding: 0 6px 0 12px; border: 1px solid transparent; border-radius: var(--radius);
+  cursor: pointer; white-space: nowrap; display: flex; gap: 6px; align-items: center; color: var(--muted); flex: none;
+}
+.tab:hover { background: var(--panel); color: var(--text); }
+.tab.active { background: var(--cm-bg); border-color: var(--border); color: var(--text); }
+.tab .close {
+  width: 18px; height: 18px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center;
+  opacity: .55; font-size: 14px; line-height: 1;
+}
+.tab .close:hover { opacity: 1; background: var(--panel2); }
 .tab.dirty .name::after { content: " ●"; color: var(--accent); }
 #banner { padding: 6px 10px; background: var(--hl); display: flex; gap: 10px; align-items: center; flex: none; }
 #editor { flex: 1; min-height: 0; }
@@ -183,7 +197,8 @@ li.CodeMirror-hint-active { background: var(--accent); color: var(--accent-text)
 #quota .q-sum { cursor: pointer; white-space: nowrap; overflow: hidden; }
 #quota .q-sum:hover { color: var(--text); }
 #quota .q-sum .warn { color: var(--warn); } #quota .q-sum .err { color: var(--err); font-weight: 600; }
-#quota .q-open { margin-left: auto; }
+#quota .q-open { margin-left: auto; display: inline-flex; }
+#quota .q-open .ico { width: 12px; height: 12px; }
 #chat-log { flex: 1; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
 .msg { border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; word-wrap: break-word; line-height: 1.5; }
 .msg.user { background: var(--sel); align-self: flex-end; max-width: 92%; }

@@ -65,6 +65,8 @@ input:focus { outline: none; border-color: var(--accent); }
 }
 .card-p:hover .pin, .pin.on, .pin:focus-visible { opacity: 1; }
 .pin.on { color: var(--warn); }
+.pin .ico { width: 15px; height: 15px; }
+.pin.on .ico { fill: currentColor; }
 
 .body { padding: 10px 12px 4px; display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
 .body .name {
