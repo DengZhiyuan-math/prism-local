@@ -580,6 +580,21 @@ const provLabel = () => prov().label || "the agent";
 // Settings saved before providers existed belong to Claude Code.
 const provGet = (k) => store.get(`chat.${k}.${C.provider}`, C.provider === "claude" ? store.get(`chat.${k}`, null) : null);
 const provSet = (k, v) => store.set(`chat.${k}.${C.provider}`, v);
+// The account the provider runs under (Claude Code: `claude auth status`), and whether
+// it is the one allowed in Home → Settings. A mismatch stops every turn on the server.
+async function loadAccount() {
+  const el = $("#agent-account");
+  const r = await api("/api/agent/account?provider=" + encodeURIComponent(C.provider || "")).catch(() => null);
+  const a = r && r._status === 200 && r.account;
+  if (!a) { el.hidden = true; return; }
+  el.hidden = false;
+  const who = a.email ? a.email + (a.org ? " · " + a.org : "") : "not logged in";
+  el.className = r.problem ? "bad" : r.allowed ? "locked" : "";
+  el.textContent = r.problem ? r.problem : (r.allowed ? "Allowed account: " : "Account: ") + who;
+  el.title = r.problem ? "" : r.allowed
+    ? "Only this account may be used (Home → Settings). Each message is checked before it is sent."
+    : "The account Claude Code is logged in to. Home → Settings can allow only this one.";
+}
 function loadProvider() {
   C.session = provGet("session"); C.model = provGet("model"); C.effort = provGet("effort");
 }
@@ -764,7 +779,7 @@ async function chatSend() {
         const el = tools.get(e.id);
         if (el) { el.querySelector(".st").textContent = e.error ? "✗" : "✓"; if (e.error) { el.classList.add("err"); el.title += "\n" + e.preview; } }
       } else if (e.t === "error") chatAppend(`<div class="err">${esc(e.message)}</div>`, "card");
-      else if (e.t === "done") renderTurnCard(e);
+      else if (e.t === "done") { renderTurnCard(e); loadAccount(); }
     }
     after += d.events.length; done = d.done;
   }
@@ -983,7 +998,7 @@ function setProvider(id, quiet) {
   const p = P.byId[id];
   if (!p) return sysNote(`<span class="err">Unknown provider: ${esc(id)}. Try <code>/provider</code>.</span>`);
   if (C.job) return toast("Wait for the current turn to finish.");
-  C.provider = id; store.set("chat.provider", id); loadProvider();
+  C.provider = id; store.set("chat.provider", id); loadProvider(); loadAccount();
   catalog = null;
   $("#chat-provider").value = id;
   $("#quota").hidden = !p.usage_limits;

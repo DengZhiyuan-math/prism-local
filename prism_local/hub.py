@@ -36,6 +36,7 @@ from presence import Presence, serve_stream, valid_id  # noqa: E402
 from server import (EDITABLE_SUFFIXES, MIME, SKIP_DIRS, STATIC, Server,  # noqa: E402
                     log, remove_ready_file, write_ready_file)
 from agent import NO_WINDOW  # noqa: E402
+from backend_claude import claude_account, claude_bin  # noqa: E402
 
 PRESENCE = Presence()
 MAX_SCAN = 3000
@@ -249,7 +250,8 @@ def _add(data: dict, p: Path) -> None:
 # ---------------------------------------------------------------- settings
 
 SETTINGS_DEFAULTS = {"default_parent": "", "git_init": True, "github_repo": False,
-                     "github_owner": ""}
+                     "github_owner": "", "claude_account": ""}
+EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 REPO_RE = re.compile(r"[A-Za-z0-9._-]{1,100}")
 OWNER_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 
@@ -273,6 +275,11 @@ def save_settings(body: dict) -> dict:
     for k in ("git_init", "github_repo"):
         if k in body:
             cur[k] = bool(body[k])
+    if "claude_account" in body:
+        acct = str(body["claude_account"] or "").strip()
+        if acct and not EMAIL_RE.fullmatch(acct):
+            raise ValueError("the Claude account must be an email address")
+        cur["claude_account"] = acct
     if "github_owner" in body:
         owner = str(body["github_owner"] or "").strip()
         if owner and not OWNER_RE.fullmatch(owner):
@@ -311,6 +318,11 @@ def gh_status(refresh: bool = False) -> dict:
             status["error"] = f"gh auth status failed: {e}"
     _gh_cache.update(at=time.time(), status=status)
     return status
+
+
+def claude_status(refresh: bool = False) -> dict:
+    """The account Claude Code is logged in to, and anything that would override it."""
+    return claude_account(claude_bin(), None, max_age=0 if refresh else 30)
 
 
 def repo_name(folder: str) -> str:
@@ -603,7 +615,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(list_projects())
             if u.path == "/api/settings":
                 return self._json({"settings": load_settings(),
-                                   "github": gh_status(refresh=q.get("refresh") == "1")})
+                                   "github": gh_status(refresh=q.get("refresh") == "1"),
+                                   "claude": claude_status(q.get("refresh") == "1")})
             if u.path == "/api/git":
                 return self._json({"git": git_info(Path(entry_for(q["id"])["path"]))})
             if u.path == "/api/pdf":
@@ -643,7 +656,8 @@ class Handler(BaseHTTPRequestHandler):
                 PRESENCE.beat(cid)
                 return self._json({"ok": True})
             if u.path == "/api/settings":
-                return self._json({"settings": save_settings(body), "github": gh_status()})
+                return self._json({"settings": save_settings(body), "github": gh_status(),
+                                   "claude": claude_status()})
             if u.path == "/api/projects/add":
                 return self._json(add_project(str(body["path"])))
             if u.path == "/api/projects/create":

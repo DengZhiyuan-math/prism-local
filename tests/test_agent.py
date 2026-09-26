@@ -345,5 +345,46 @@ class Registry(unittest.TestCase):
         self.assertIn("claude", bs)
 
 
+class ClaudeAccountGuard(unittest.TestCase):
+    """Only the account allowed in Home -> Settings may run turns (backend_claude)."""
+    OK = {"logged_in": True, "email": "me@uni.example", "org": "Lab", "auth_method": "claude.ai",
+          "api_provider": "firstParty", "overrides": []}
+
+    def setUp(self):
+        import backend_claude
+        self.bc = backend_claude
+
+    def test_no_allowed_account_means_no_check(self):
+        self.assertIsNone(self.bc.account_problem({"logged_in": False}, ""))
+
+    def test_matching_account_passes_case_insensitively(self):
+        self.assertIsNone(self.bc.account_problem(self.OK, "Me@Uni.Example"))
+
+    def test_refusals(self):
+        allowed = "me@uni.example"
+        cases = {
+            "another account": {**self.OK, "email": "other@example.com"},
+            "API key": {**self.OK, "overrides": ["the environment variable ANTHROPIC_API_KEY"]},
+            "console login": {**self.OK, "auth_method": "console"},
+            "bedrock": {**self.OK, "api_provider": "bedrock"},
+            "logged out": {"logged_in": False, "overrides": []},
+            "check failed": {"logged_in": False, "error": "boom", "overrides": []},
+        }
+        for name, info in cases.items():
+            msg = self.bc.account_problem(info, allowed)
+            self.assertTrue(msg, name)
+            self.assertIn("me@uni.example", msg, name)
+
+    def test_project_settings_that_switch_to_an_api_key_are_found(self):
+        import json, tempfile
+        root = Path(tempfile.mkdtemp())
+        (root / ".claude").mkdir()
+        (root / ".claude" / "settings.json").write_text(json.dumps({"apiKeyHelper": "get-key.sh"}))
+        (root / ".claude" / "settings.local.json").write_text(json.dumps({"env": {"ANTHROPIC_API_KEY": "x"}}))
+        found = self.bc.auth_overrides(root)
+        self.assertTrue(any("apiKeyHelper" in f for f in found))
+        self.assertTrue(any("ANTHROPIC_API_KEY" in f and "settings.local.json" in f for f in found))
+
+
 if __name__ == "__main__":
     unittest.main()

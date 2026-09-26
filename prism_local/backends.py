@@ -157,6 +157,10 @@ class Backend:
                     f"Effort for {self.label} must be one of: {', '.join(self.efforts)}")
         return None
 
+    def preflight(self, root: Path) -> str | None:
+        """Checked right before each turn; a message here stops the turn (nothing is sent)."""
+        return None
+
     def run(self, job: Job) -> dict:
         raise NotImplementedError
 

@@ -184,6 +184,10 @@ li.CodeMirror-hint-active { background: var(--accent); color: var(--accent-text)
 #chat-head select { min-width: 0; flex: 0 1 auto; text-overflow: ellipsis; }
 #chat-head button { flex: none; white-space: nowrap; }
 #quota[hidden] { display: none; }
+#agent-account { padding: 5px 10px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#agent-account.locked::before { content: "● "; color: var(--ok); }
+#agent-account.bad { color: var(--err); white-space: normal; font-weight: 600; }
 #quota { padding: 6px 10px 7px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: auto 1fr auto; gap: 3px 8px; align-items: center; font-size: 11px; color: var(--muted); }
 #quota .bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; border: 1px solid var(--border); }
 #quota .bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }

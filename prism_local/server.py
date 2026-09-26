@@ -608,6 +608,11 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/agent/commands":
                 r = AGENT.commands(q.get("provider") or None, refresh=q.get("refresh") == "1")
                 return self._json(r, 502 if "error" in r else 200)
+            if u.path == "/api/agent/account":
+                b = AGENT.backend(q.get("provider") or None)
+                if b is None or not hasattr(b, "account"):
+                    return self._json({"account": None})
+                return self._json(b.account(ROOT, fresh=q.get("fresh") == "1"))
             if u.path == "/api/agent/info":
                 return self._json(AGENT.info())
             if u.path == "/api/symbols":

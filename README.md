@@ -99,6 +99,15 @@ bin/prism-home                            # opens http://127.0.0.1:8790/
   organization. If GitHub refuses, the project is still created and the message says why.
 - **⚙ Settings** also sets the default location for new projects and whether they get a git
   repository.
+- **Only one Claude account.** prism-local has no login of its own: the agent panel runs your
+  local `claude`, so it uses whichever account Claude Code is logged in to. Settings shows that
+  account (from `claude auth status`), and *Only allow this account* locks it. Before every
+  message the editor then checks, afresh, that Claude Code is logged in to exactly that account
+  with its claude.ai subscription. If it is another account, or something would switch it to
+  API billing or another login (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock/Vertex, or an `apiKeyHelper` or such `env` in the user or
+  project `.claude/settings*.json`), nothing is sent and the panel says why. The agent panel
+  always shows the account in use.
 - The git chip shows the project's own repository, with a link to it on GitHub. A folder
   inside some other repository (such as `examples/minimal`, inside prism-local's) has none of
   its own, and the chip says so.

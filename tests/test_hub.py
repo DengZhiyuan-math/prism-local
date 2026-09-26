@@ -115,6 +115,10 @@ class SettingsAndGitHub(TempState):
             hub.save_settings({"github_owner": "not an owner!"})
         with self.assertRaises(ValueError):
             hub.save_settings({"default_parent": str(self.tmp / "missing")})
+        self.assertEqual(hub.save_settings({"claude_account": " me@uni.example "})["claude_account"],
+                         "me@uni.example")
+        with self.assertRaises(ValueError):
+            hub.save_settings({"claude_account": "not an email"})
 
     def test_repo_names(self):
         self.assertEqual(hub.repo_name("dyn num paper"), "dyn-num-paper")

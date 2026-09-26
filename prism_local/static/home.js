@@ -394,7 +394,7 @@ $("#btn-new").onclick = openNew;
 /* ------------------------------------------------------------------ settings */
 async function loadSettings(refresh = false) {
   const r = await api("/api/settings" + (refresh ? "?refresh=1" : "")).catch(() => null);
-  if (r && r._status === 200) { H.settings = r.settings; H.github = r.github; }
+  if (r && r._status === 200) { H.settings = r.settings; H.github = r.github; H.claude = r.claude; }
   return r;
 }
 function renderGhStatus() {
@@ -404,7 +404,29 @@ function renderGhStatus() {
   const f = $("#form-settings");
   f.elements.github_repo.disabled = !gh.logged_in;
   f.elements.github_owner.placeholder = gh.account || "";
+  renderClaudeStatus();
 }
+// Which account Claude Code uses now, and whether it matches the one allowed.
+function renderClaudeStatus() {
+  const el = $("#claude-status"), c = H.claude || {}, f = $("#form-settings");
+  const want = f.elements.claude_account.value.trim().toLowerCase();
+  const who = c.email ? `${c.email}${c.org ? " · " + c.org : ""}${c.subscription ? " (" + c.subscription + ")" : ""}` : "";
+  let ok = !!c.logged_in && !c.error && !(c.overrides || []).length;
+  let text;
+  if (c.error) text = "Could not check: " + c.error;
+  else if (!c.logged_in) text = "Claude Code is not logged in. Run claude in a terminal and log in.";
+  else if ((c.overrides || []).length) text = `Logged in as ${who}, but overridden by ${c.overrides.join("; ")}.`;
+  else if (want && c.email && want !== c.email.toLowerCase()) { ok = false; text = `Logged in as ${who}, not the allowed account: the agent will refuse to run.`; }
+  else text = `✓ Claude Code is logged in as ${who}`;
+  el.className = "gh-status " + (ok ? "ok" : "err");
+  el.textContent = text;
+  $("#claude-use-current").disabled = !c.email;
+}
+$("#claude-use-current").onclick = () => {
+  const f = $("#form-settings");
+  if (H.claude && H.claude.email) { f.elements.claude_account.value = H.claude.email; renderClaudeStatus(); }
+};
+$("#form-settings").addEventListener("input", (e) => { if (e.target.name === "claude_account") renderClaudeStatus(); });
 async function openSettings() {
   const f = $("#form-settings"), dlg = $("#dlg-settings");
   dlgError(dlg, "");
@@ -414,6 +436,7 @@ async function openSettings() {
     f.elements.git_init.checked = st.git_init !== false;
     f.elements.github_repo.checked = !!st.github_repo;
     f.elements.github_owner.value = st.github_owner || "";
+    f.elements.claude_account.value = st.claude_account || "";
     renderGhStatus();
   };
   fill(); dlg.showModal();
@@ -426,9 +449,10 @@ $("#form-settings").addEventListener("submit", async (e) => {
   const r = await api("/api/settings", {
     default_parent: f.elements.default_parent.value.trim(), git_init: f.elements.git_init.checked,
     github_repo: f.elements.github_repo.checked, github_owner: f.elements.github_owner.value.trim(),
+    claude_account: f.elements.claude_account.value.trim(),
   });
   if (r._status !== 200) return dlgError(dlg, r.error || "Could not save the settings");
-  H.settings = r.settings; H.github = r.github; H.sig = null;
+  H.settings = r.settings; H.github = r.github; H.claude = r.claude; H.sig = null;
   dlg.close(); toast("Settings saved"); load();
 });
 $("#btn-add").onclick = openAdd;

@@ -13,12 +13,15 @@ runs cannot approve anything else). "ask" mode uses plan mode (read-only).
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
 
+import registry
 from backends import NO_WINDOW, SYSTEM_APPEND, CliBackend, Job, find_bin, kill_tree
 
 MODES = {"edit": "acceptEdits", "ask": "plan"}
@@ -27,6 +30,92 @@ MODES = {"edit": "acceptEdits", "ask": "plan"}
 def claude_bin() -> str | None:
     return find_bin("CLAUDE_BIN", "claude",
                     ("/opt/homebrew/bin/claude", str(Path.home() / ".local/bin/claude")))
+
+
+# ---------------------------------------------------------------- which account
+
+# Any of these makes Claude Code use something other than the claude.ai login: an API
+# key (billed per token), another account's token, or a cloud provider.
+OVERRIDE_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+_account_cache: dict = {}
+
+
+def auth_overrides(root: Path | None) -> list[str]:
+    """Settings that would take Claude Code away from the account login."""
+    found = [f"the environment variable {v}" for v in OVERRIDE_ENV if os.environ.get(v)]
+    cfg = Path(os.environ["CLAUDE_CONFIG_DIR"]) if os.environ.get("CLAUDE_CONFIG_DIR") \
+        else Path.home() / ".claude"
+    files = [cfg / "settings.json"]
+    if root:
+        files += [Path(root) / ".claude" / "settings.json",
+                  Path(root) / ".claude" / "settings.local.json"]
+    for f in files:
+        data = registry.read_json(f) or {}
+        if not isinstance(data, dict):
+            continue
+        if data.get("apiKeyHelper"):
+            found.append(f"apiKeyHelper in {f}")
+        env = data.get("env") if isinstance(data.get("env"), dict) else {}
+        found += [f"{v} in {f}" for v in OVERRIDE_ENV if env.get(v)]
+    return found
+
+
+def claude_account(exe: str | None, root: Path | None = None, max_age: float = 30) -> dict:
+    """Who Claude Code is logged in as, from `claude auth status` (local, about 0.2 s)."""
+    key = (exe, str(root))
+    hit = _account_cache.get(key)
+    if hit and time.time() - hit[0] < max_age:
+        return hit[1]
+    info: dict = {"logged_in": False}
+    if not exe:
+        info["error"] = "Claude Code CLI not found"
+    else:
+        try:
+            r = subprocess.run([exe, "auth", "status"], cwd=str(root) if root else None,
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=20, **NO_WINDOW)
+            m = re.search(r"\{.*\}", r.stdout, re.S)
+            d = json.loads(m.group(0)) if m else {}
+            info = {"logged_in": bool(d.get("loggedIn")), "email": d.get("email"),
+                    "org": d.get("orgName"), "subscription": d.get("subscriptionType"),
+                    "auth_method": d.get("authMethod"), "api_provider": d.get("apiProvider")}
+            if not m:
+                info["error"] = (r.stderr or r.stdout).strip()[:300] or "no answer"
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            info["error"] = str(e)
+    info["overrides"] = auth_overrides(root)
+    _account_cache[key] = (time.time(), info)
+    return info
+
+
+def allowed_account() -> str:
+    """The only Claude account prism-local may use (Home → Settings); empty: any."""
+    data = registry.read_json(registry.state_dir() / "settings.json") or {}
+    return str(data.get("claude_account") or "").strip()
+
+
+def account_problem(info: dict, allowed: str) -> str | None:
+    """Why a turn must not run with this login, or None. Only when an account is set."""
+    if not allowed:
+        return None
+    where = "Home → Settings allows only " + allowed
+    if info.get("error"):
+        return f"Could not check which Claude account is logged in ({info['error']}). {where}, so nothing was sent."
+    if info.get("overrides"):
+        return ("Claude Code would not use your account login here, because of "
+                + "; ".join(info["overrides"]) + ". That bills an API key or another account. "
+                f"{where}, so nothing was sent.")
+    if (info.get("auth_method") or "claude.ai") != "claude.ai" \
+            or (info.get("api_provider") or "firstParty") != "firstParty":
+        return (f"Claude Code is using {info.get('auth_method')} / {info.get('api_provider')}, "
+                f"not a claude.ai account login. {where}, so nothing was sent.")
+    if not info.get("logged_in"):
+        return f"Claude Code is not logged in. {where}. Run `claude` in a terminal and log in."
+    if (info.get("email") or "").lower() != allowed.lower():
+        return (f"Claude Code is logged in as {info.get('email')}, not {allowed}. {where}, so "
+                "nothing was sent. Run `claude` in a terminal and use /login, or change the setting.")
+    return None
 
 
 def _summarize_tool(name: str, inp: dict, root: Path) -> str:
@@ -77,6 +166,15 @@ class ClaudeCode(CliBackend):
 
     def info(self) -> dict:
         return {**super().info(), "bin": self.bin(), "rate": self.rate}
+
+    def account(self, root: Path | None, fresh: bool = False) -> dict:
+        info = claude_account(self.bin(), root, max_age=0 if fresh else 30)
+        allowed = allowed_account()
+        return {"account": info, "allowed": allowed, "problem": account_problem(info, allowed)}
+
+    def preflight(self, root: Path) -> str | None:
+        # Checked afresh before every turn when an account is set in Home → Settings.
+        return self.account(root, fresh=True)["problem"] if allowed_account() else None
 
     @staticmethod
     def scope_rules(scope: list[str]) -> list[str]:

@@ -91,7 +91,7 @@ class AgentManager:
             return {"error": why}
         if model and not MODEL_RE.fullmatch(model):
             return {"error": f"Not a model name: {model}"}
-        bad = backend.check(model, effort)
+        bad = backend.check(model, effort) or backend.preflight(self.root_fn())
         if bad:
             return {"error": bad}
         with self.lock:
